@@ -4,8 +4,9 @@ use windows_sys::Win32::UI::Shell::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IMAGE_ICON, LoadImageW,
-    LR_DEFAULTSIZE, LR_SHARED, MF_STRING, TrackPopupMenu, TPM_LEFTALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
+    LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DEFAULT, MF_SEPARATOR,
+    MF_STRING, MessageBoxW, TrackPopupMenu, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_TOPALIGN, WM_RBUTTONUP,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
@@ -13,8 +14,10 @@ use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 /// (WM_APP = 0x8000.)
 pub const TRAY_CALLBACK_MSG: u32 = 0x8001;
 
-/// Menu item ID for "Quit".
+/// Menu item IDs.
 const MENU_QUIT: u32 = 1;
+const MENU_STARTUP: u32 = 2;
+const MENU_ABOUT: u32 = 3;
 
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
@@ -70,12 +73,36 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     if menu.is_null() {
         return;
     }
+
+    // Start on startup (checkable — check reflects current registry state).
+    let startup_flags = MF_STRING | if crate::autostart::is_enabled() { MF_CHECKED } else { 0 };
+    AppendMenuW(
+        menu,
+        startup_flags,
+        MENU_STARTUP as usize,
+        crate::clipboard::wide("Start on startup").as_ptr(),
+    );
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+
+    // About (bold — MF_DEFAULT marks it as the default menu item).
+    AppendMenuW(
+        menu,
+        MF_STRING | MF_DEFAULT,
+        MENU_ABOUT as usize,
+        crate::clipboard::wide("About").as_ptr(),
+    );
+
+    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+
+    // Quit.
     AppendMenuW(
         menu,
         MF_STRING,
         MENU_QUIT as usize,
         crate::clipboard::wide("Quit").as_ptr(),
     );
+
     let cmd = TrackPopupMenu(
         menu,
         TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
@@ -87,7 +114,21 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     );
     DestroyMenu(menu);
 
-    if cmd == MENU_QUIT as i32 {
-        windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+    match cmd as u32 {
+        MENU_STARTUP => {
+            crate::autostart::toggle();
+        }
+        MENU_ABOUT => {
+            MessageBoxW(
+                hwnd,
+                crate::clipboard::wide("Made by Cris with much <3 for his friends").as_ptr(),
+                crate::clipboard::wide("About").as_ptr(),
+                MB_OK | MB_ICONINFORMATION,
+            );
+        }
+        MENU_QUIT => {
+            windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
+        }
+        _ => {}
     }
 }
