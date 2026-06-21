@@ -84,7 +84,10 @@ unsafe extern "system" fn window_proc(
             do_pending_write(hwnd);
             0
         }
-        // Tray callback (WM_APP+1) handled in Task 8.
+        crate::tray::TRAY_CALLBACK_MSG => {
+            crate::tray::handle_event(hwnd, lparam);
+            0
+        }
         WM_DESTROY => {
             PostQuitMessage(0);
             0
