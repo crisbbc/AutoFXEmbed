@@ -10,7 +10,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::clipboard;
-use crate::transform::transform_clipboard;
+use crate::transform::transform_text;
 
 /// Custom message: perform the deferred clipboard write.
 /// (WM_APP is 0x8000; we use 0x8002 to leave room for the tray callback at 0x8001.)
@@ -103,7 +103,7 @@ unsafe fn handle_clipboard_update(hwnd: HWND) {
     let Some(text) = clipboard::read_text(hwnd) else {
         return;
     };
-    let Some(new_text) = transform_clipboard(&text) else {
+    let Some(new_text) = transform_text(&text) else {
         return; // not a link we handle (or already transformed) -> no write, no loop
     };
     if let Ok(mut guard) = PENDING_WRITE.lock() {
