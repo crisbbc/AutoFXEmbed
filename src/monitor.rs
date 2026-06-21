@@ -55,7 +55,7 @@ pub fn run() {
             return;
         }
 
-        // Tray icon added in Task 7 here: crate::tray::add(hwnd);
+        crate::tray::add(hwnd);
 
         let mut msg: MSG = std::mem::zeroed();
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
@@ -63,7 +63,7 @@ pub fn run() {
             DispatchMessageW(&msg);
         }
 
-        // Tray removal added in Task 7 here: crate::tray::remove(hwnd);
+        crate::tray::remove(hwnd);
         RemoveClipboardFormatListener(hwnd);
         DestroyWindow(hwnd);
     }
