@@ -1,0 +1,21 @@
+[package]
+name = "autofxembed"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_DataExchange",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_UI_Shell",
+] }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
