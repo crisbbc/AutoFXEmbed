@@ -27,8 +27,10 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
         ("", trimmed)
     };
 
-    // Only rewrite clean single URLs (no internal whitespace).
-    if after_scheme.contains(' ') || after_scheme.contains('\t') {
+    // Only rewrite clean single URLs (no internal whitespace of any kind —
+    // spaces, tabs, newlines, …). Anything with internal whitespace is left
+    // for `transform_embedded` to handle token by token.
+    if after_scheme.chars().any(|c| c.is_whitespace()) {
         return None;
     }
 

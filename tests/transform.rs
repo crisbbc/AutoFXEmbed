@@ -121,3 +121,13 @@ fn skips_url_with_internal_space() {
 fn skips_prose_containing_url() {
     assert_eq!(transform_clipboard("check out https://twitter.com/foo"), None);
 }
+
+#[test]
+fn skips_url_with_internal_newline() {
+    // A newline inside what looks like a single URL means it isn't one clean
+    // URL — leave it for the embedded-link path to handle token by token.
+    assert_eq!(
+        transform_clipboard("https://twitter.com/a\nhttps://x.com/b"),
+        None
+    );
+}

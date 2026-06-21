@@ -87,3 +87,13 @@ fn transform_text_skips_empty_and_whitespace_only() {
     assert_eq!(transform_text("   "), None);
     assert_eq!(transform_text("\n\t  \n"), None);
 }
+
+#[test]
+fn transform_text_transforms_each_newline_separated_url() {
+    // Two tweet links, one per line, no spaces: every URL must be rewritten
+    // (the fast path must NOT swallow this into a single-host rewrite).
+    assert_eq!(
+        transform_text("https://twitter.com/a\nhttps://x.com/b"),
+        Some("https://fxtwitter.com/a\nhttps://fixupx.com/b".to_string())
+    );
+}
