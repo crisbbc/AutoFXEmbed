@@ -48,3 +48,54 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
     }
     None
 }
+
+/// If `text` is a single supported URL, OR contains one or more supported URLs
+/// embedded in surrounding text, return `text` with every such URL rewritten to
+/// its FxEmbed form (surrounding text and whitespace preserved). Otherwise
+/// return `None` (leave the clipboard untouched). Never rewrites an
+/// already-transformed host.
+///
+/// Single-link inputs are trimmed and handled by [`transform_clipboard`]; prose
+/// with embedded links preserves all surrounding text verbatim.
+pub fn transform_text(text: &str) -> Option<String> {
+    // Fast path: the whole input is one clean URL (trims surrounding ws).
+    if let Some(out) = transform_clipboard(text) {
+        return Some(out);
+    }
+    transform_embedded(text)
+}
+
+/// Scan `text` for URLs embedded in prose and rewrite each one in place.
+/// Whitespace (spaces, tabs, newlines, …) splits tokens and is preserved
+/// verbatim; each non-whitespace token is offered to [`transform_clipboard`].
+/// Returns `None` when no token changed (so the clipboard is left alone and we
+/// avoid a re-write loop).
+fn transform_embedded(text: &str) -> Option<String> {
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut changed = false;
+    let mut rest = text;
+
+    while !rest.is_empty() {
+        // Leading whitespace run: copy it verbatim.
+        let after_ws = rest.trim_start_matches(|c: char| c.is_whitespace());
+        let ws_len = rest.len() - after_ws.len();
+        out.push_str(&rest[..ws_len]);
+        rest = after_ws;
+        if rest.is_empty() {
+            break;
+        }
+        // Next token: everything up to the next whitespace char (or end).
+        let tok_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+        let token = &rest[..tok_end];
+        match transform_clipboard(token) {
+            Some(rewritten) => {
+                out.push_str(&rewritten);
+                changed = true;
+            }
+            None => out.push_str(token),
+        }
+        rest = &rest[tok_end..];
+    }
+
+    if changed { Some(out) } else { None }
+}
