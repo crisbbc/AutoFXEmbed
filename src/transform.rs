@@ -5,6 +5,11 @@ const RULES: &[(&str, &str)] = &[
     ("bsky.app", "fxbsky.app"),
 ];
 
+/// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
+fn host_matches(host: &str, domain: &str) -> bool {
+    host == domain || host.ends_with(&format!(".{}", domain))
+}
+
 /// If `text` is a single X/Twitter/Bluesky URL, return the FxEmbed form.
 /// Otherwise return `None` (leave the clipboard untouched).
 pub fn transform_clipboard(text: &str) -> Option<String> {
@@ -13,11 +18,12 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
         return None;
     }
 
-    // Split off the scheme (preserve it for the output). Only https for now.
+    // Split off the scheme (preserve it for the output).
     let (scheme, after_scheme) = if let Some(rest) = trimmed.strip_prefix("https://") {
         ("https://", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://") {
+        ("http://", rest)
     } else {
-        // No recognised scheme -> treat the whole string as the host+path.
         ("", trimmed)
     };
 
@@ -26,7 +32,7 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
     let host = &after_scheme[..path_start];
 
     for &(domain, replacement) in RULES {
-        if host == domain {
+        if host_matches(host, domain) {
             let new_host = host.replacen(domain, replacement, 1);
             let mut result = String::with_capacity(trimmed.len() + 4);
             result.push_str(scheme);
