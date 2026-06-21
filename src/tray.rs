@@ -3,10 +3,11 @@ use windows_sys::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IDI_APPLICATION, LoadIconW,
-    MF_STRING, TrackPopupMenu, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN,
-    WM_RBUTTONUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IMAGE_ICON, LoadImageW,
+    LR_DEFAULTSIZE, LR_SHARED, MF_STRING, TrackPopupMenu, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
 };
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 /// Custom message Windows sends to our window when the tray icon is interacted with.
 /// (WM_APP = 0x8000.)
@@ -25,7 +26,15 @@ pub unsafe fn add(hwnd: HWND) {
     nid.uID = 1;
     nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     nid.uCallbackMessage = TRAY_CALLBACK_MSG;
-    nid.hIcon = LoadIconW(std::ptr::null_mut(), IDI_APPLICATION);
+    let hinst = GetModuleHandleW(std::ptr::null());
+    nid.hIcon = LoadImageW(
+        hinst,
+        1u16 as usize as windows_sys::core::PCWSTR,
+        IMAGE_ICON,
+        0,
+        0,
+        LR_DEFAULTSIZE | LR_SHARED,
+    );
     let n = tip.len().min(nid.szTip.len());
     nid.szTip[..n].copy_from_slice(&tip[..n]);
     Shell_NotifyIconW(NIM_ADD, &nid);
