@@ -27,6 +27,11 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
         ("", trimmed)
     };
 
+    // Only rewrite clean single URLs (no internal whitespace).
+    if after_scheme.contains(' ') || after_scheme.contains('\t') {
+        return None;
+    }
+
     // Host = everything up to the first '/' (or the whole thing if no path).
     let path_start = after_scheme.find('/').unwrap_or(after_scheme.len());
     let host = &after_scheme[..path_start];

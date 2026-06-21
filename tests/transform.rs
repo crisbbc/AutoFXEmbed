@@ -79,3 +79,45 @@ fn trims_surrounding_whitespace() {
         Some("https://fxtwitter.com/foo".to_string())
     );
 }
+
+#[test]
+fn skips_already_transformed_twitter() {
+    assert_eq!(transform_clipboard("https://fxtwitter.com/foo"), None);
+}
+
+#[test]
+fn skips_already_transformed_x() {
+    assert_eq!(transform_clipboard("https://fixupx.com/foo"), None);
+}
+
+#[test]
+fn skips_already_transformed_bsky() {
+    assert_eq!(transform_clipboard("https://fxbsky.app/foo"), None);
+}
+
+#[test]
+fn skips_non_matching_url() {
+    assert_eq!(transform_clipboard("https://example.com/foo"), None);
+}
+
+#[test]
+fn skips_plain_text() {
+    assert_eq!(transform_clipboard("Hello world"), None);
+}
+
+#[test]
+fn skips_empty() {
+    assert_eq!(transform_clipboard(""), None);
+    assert_eq!(transform_clipboard("   "), None);
+}
+
+#[test]
+fn skips_url_with_internal_space() {
+    // Not a clean URL -> leave alone.
+    assert_eq!(transform_clipboard("https://twitter.com/foo bar"), None);
+}
+
+#[test]
+fn skips_prose_containing_url() {
+    assert_eq!(transform_clipboard("check out https://twitter.com/foo"), None);
+}
