@@ -4,26 +4,79 @@
 //! `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` so Windows
 //! launches AutoFxEmbed at logon. The registry IS the persisted state — the
 //! tray menu reads it fresh on each right-click.
+//!
+//! ## Linux
+//!
+//! On Linux we create/remove a `.desktop` file under
+//! `$XDG_CONFIG_HOME/autostart/` (or `~/.config/autostart/`).
 
+#[cfg(target_os = "windows")]
 use crate::clipboard::wide; // reuse the existing null-terminated UTF-16 helper (DRY)
+
+// ---------------------------------------------------------------------------
+// cross-platform public API
+// ---------------------------------------------------------------------------
+
+/// `true` if the auto-start Run value currently exists.
+pub fn is_enabled() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        unsafe { is_enabled_windows() }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        is_enabled_linux()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+/// Toggle auto-start on/off and return the new enabled state.
+pub fn toggle() -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        unsafe { toggle_windows() }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        toggle_linux()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows implementation (registry)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
     HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE, REG_SZ,
 };
 
 /// Registry subkey under HKEY_CURRENT_USER that Windows reads at logon.
+#[cfg(target_os = "windows")]
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
 /// The value name we use inside that key.
+#[cfg(target_os = "windows")]
 const VALUE_NAME: &str = "AutoFxEmbed";
 
 /// `true` if the auto-start Run value currently exists (and is a string).
 ///
 /// # Safety
 /// Calls Win32 registry APIs.
-pub unsafe fn is_enabled() -> bool {
+#[cfg(target_os = "windows")]
+unsafe fn is_enabled_windows() -> bool {
     let sub = wide(RUN_KEY);
     let val = wide(VALUE_NAME);
     let mut hkey: HKEY = std::ptr::null_mut();
@@ -49,6 +102,7 @@ pub unsafe fn is_enabled() -> bool {
 ///
 /// # Safety
 /// Calls GetModuleFileNameW.
+#[cfg(target_os = "windows")]
 unsafe fn quoted_exe_path() -> Vec<u16> {
     let mut buf = [0u16; 1024];
     let len = GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
@@ -63,11 +117,13 @@ unsafe fn quoted_exe_path() -> Vec<u16> {
 ///
 /// # Safety
 /// Calls Win32 registry APIs.
-pub unsafe fn enable() -> bool {
+#[cfg(target_os = "windows")]
+unsafe fn enable_windows() -> bool {
     let sub = wide(RUN_KEY);
     let val = wide(VALUE_NAME);
     let mut hkey: HKEY = std::ptr::null_mut();
-    if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS
+    {
         return false;
     }
     let data = quoted_exe_path();
@@ -82,11 +138,13 @@ pub unsafe fn enable() -> bool {
 ///
 /// # Safety
 /// Calls Win32 registry APIs.
-pub unsafe fn disable() -> bool {
+#[cfg(target_os = "windows")]
+unsafe fn disable_windows() -> bool {
     let sub = wide(RUN_KEY);
     let val = wide(VALUE_NAME);
     let mut hkey: HKEY = std::ptr::null_mut();
-    if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS {
+    if RegOpenKeyExW(HKEY_CURRENT_USER, sub.as_ptr(), 0, KEY_SET_VALUE, &mut hkey) != ERROR_SUCCESS
+    {
         return false;
     }
     let rc = RegDeleteValueW(hkey, val.as_ptr());
@@ -98,13 +156,93 @@ pub unsafe fn disable() -> bool {
 ///
 /// # Safety
 /// Calls Win32 registry APIs.
-pub unsafe fn toggle() -> bool {
-    if is_enabled() {
-        disable();
+#[cfg(target_os = "windows")]
+unsafe fn toggle_windows() -> bool {
+    if is_enabled_windows() {
+        disable_windows();
         false
-    } else if enable() {
+    } else if enable_windows() {
         true
     } else {
-        is_enabled()
+        is_enabled_windows()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Linux implementation (.desktop file in XDG autostart)
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+fn autostart_dir() -> Option<std::path::PathBuf> {
+    dirs::config_dir().map(|p| p.join("autostart"))
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_path() -> Option<std::path::PathBuf> {
+    autostart_dir().map(|p| p.join("autofxembed.desktop"))
+}
+
+#[cfg(target_os = "linux")]
+fn is_enabled_linux() -> bool {
+    desktop_path().map_or(false, |p| p.exists())
+}
+
+#[cfg(target_os = "linux")]
+fn exe_path() -> String {
+    std::env::current_exe()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| String::new())
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_file_content() -> String {
+    format!(
+        "\
+[Desktop Entry]
+Type=Application
+Name=AutoFxEmbed
+Comment=Auto-rewrite social-media links in the clipboard to FxEmbed
+Exec={exe}
+Terminal=false
+X-GNOME-Autostart-enabled=true
+",
+        exe = exe_path()
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn enable_linux() -> bool {
+    match desktop_path() {
+        Some(path) => {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::write(&path, desktop_file_content()).is_ok()
+        }
+        None => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn disable_linux() -> bool {
+    match desktop_path() {
+        Some(path) => {
+            if path.exists() {
+                std::fs::remove_file(&path).is_ok()
+            } else {
+                true // already absent
+            }
+        }
+        None => false,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn toggle_linux() -> bool {
+    if is_enabled_linux() {
+        disable_linux();
+        false
+    } else {
+        enable_linux()
     }
 }
