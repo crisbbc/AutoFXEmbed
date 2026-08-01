@@ -128,7 +128,14 @@ unsafe fn enable_windows() -> bool {
     }
     let data = quoted_exe_path();
     let cb = (data.len() * 2) as u32; // bytes, including the trailing null
-    let rc = RegSetValueExW(hkey, val.as_ptr(), 0, REG_SZ, data.as_ptr() as *const u8, cb);
+    let rc = RegSetValueExW(
+        hkey,
+        val.as_ptr(),
+        0,
+        REG_SZ,
+        data.as_ptr() as *const u8,
+        cb,
+    );
     RegCloseKey(hkey);
     rc == ERROR_SUCCESS
 }
@@ -159,13 +166,11 @@ unsafe fn disable_windows() -> bool {
 #[cfg(target_os = "windows")]
 unsafe fn toggle_windows() -> bool {
     if is_enabled_windows() {
-        disable_windows();
-        false
-    } else if enable_windows() {
-        true
+        let _ = disable_windows();
     } else {
-        is_enabled_windows()
+        let _ = enable_windows();
     }
+    is_enabled_windows()
 }
 
 // ---------------------------------------------------------------------------
@@ -184,7 +189,7 @@ fn desktop_path() -> Option<std::path::PathBuf> {
 
 #[cfg(target_os = "linux")]
 fn is_enabled_linux() -> bool {
-    desktop_path().map_or(false, |p| p.exists())
+    desktop_path().is_some_and(|p| p.exists())
 }
 
 #[cfg(target_os = "linux")]
@@ -192,6 +197,22 @@ fn exe_path() -> String {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| String::new())
+}
+
+#[cfg(target_os = "linux")]
+fn desktop_exec_arg(path: &str) -> String {
+    let mut quoted = String::with_capacity(path.len() + 2);
+    quoted.push('"');
+    for character in path.chars() {
+        match character {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(character),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 #[cfg(target_os = "linux")]
@@ -206,8 +227,21 @@ Exec={exe}
 Terminal=false
 X-GNOME-Autostart-enabled=true
 ",
-        exe = exe_path()
+        exe = desktop_exec_arg(&exe_path())
     )
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::desktop_exec_arg;
+
+    #[test]
+    fn quotes_and_escapes_desktop_exec_paths() {
+        assert_eq!(
+            desktop_exec_arg("/home/user/My Apps/auto\\fx\"embed"),
+            "\"/home/user/My Apps/auto\\\\fx\\\"embed\""
+        );
+    }
 }
 
 #[cfg(target_os = "linux")]

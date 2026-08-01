@@ -57,6 +57,22 @@ fn transforms_x_subdomain() {
 }
 
 #[test]
+fn transforms_url_with_port() {
+    assert_eq!(
+        transform_clipboard("https://twitter.com:443/foo"),
+        Some("https://fxtwitter.com:443/foo".to_string())
+    );
+}
+
+#[test]
+fn transforms_url_with_user_info_and_port() {
+    assert_eq!(
+        transform_clipboard("https://user:pass@twitter.com:443/foo"),
+        Some("https://user:pass@fxtwitter.com:443/foo".to_string())
+    );
+}
+
+#[test]
 fn preserves_query_and_fragment() {
     assert_eq!(
         transform_clipboard("https://twitter.com/foo?s=123&t=abc#ref"),
@@ -119,7 +135,10 @@ fn skips_url_with_internal_space() {
 
 #[test]
 fn skips_prose_containing_url() {
-    assert_eq!(transform_clipboard("check out https://twitter.com/foo"), None);
+    assert_eq!(
+        transform_clipboard("check out https://twitter.com/foo"),
+        None
+    );
 }
 
 #[test]

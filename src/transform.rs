@@ -10,6 +10,21 @@ fn host_matches(host: &str, domain: &str) -> bool {
     host == domain || host.ends_with(&format!(".{}", domain))
 }
 
+/// Return the byte range of the hostname within a URL authority.
+///
+/// The supported hosts are ordinary DNS names, so an optional user-info prefix
+/// and port can be handled without pulling in a full URL parser.
+fn authority_host_range(authority: &str) -> Option<(usize, usize)> {
+    let host_start = authority.rfind('@').map_or(0, |index| index + 1);
+    let host_port = &authority[host_start..];
+    let host_len = host_port.find(':').unwrap_or(host_port.len());
+    if host_len == 0 {
+        None
+    } else {
+        Some((host_start, host_start + host_len))
+    }
+}
+
 /// If `text` is a single X/Twitter/Bluesky URL, return the FxEmbed form.
 /// Otherwise return `None` (leave the clipboard untouched).
 pub fn transform_clipboard(text: &str) -> Option<String> {
@@ -34,17 +49,24 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
         return None;
     }
 
-    // Host = everything up to the first '/' (or the whole thing if no path).
-    let path_start = after_scheme.find('/').unwrap_or(after_scheme.len());
-    let host = &after_scheme[..path_start];
+    // Authority = everything up to the path, query, or fragment.
+    let authority_end = after_scheme
+        .find(['/', '?', '#'])
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let (host_start, host_end) = authority_host_range(authority)?;
+    let host = &authority[host_start..host_end];
 
     for &(domain, replacement) in RULES {
         if host_matches(host, domain) {
-            let new_host = host.replacen(domain, replacement, 1);
-            let mut result = String::with_capacity(trimmed.len() + 4);
+            let domain_start = host_end - domain.len();
+            let mut result =
+                String::with_capacity(trimmed.len() + replacement.len() - domain.len());
             result.push_str(scheme);
-            result.push_str(&new_host);
-            result.push_str(&after_scheme[path_start..]);
+            result.push_str(&authority[..domain_start]);
+            result.push_str(replacement);
+            result.push_str(&authority[host_end..]);
+            result.push_str(&after_scheme[authority_end..]);
             return Some(result);
         }
     }
@@ -99,5 +121,9 @@ fn transform_embedded(text: &str) -> Option<String> {
         rest = &rest[tok_end..];
     }
 
-    if changed { Some(out) } else { None }
+    if changed {
+        Some(out)
+    } else {
+        None
+    }
 }

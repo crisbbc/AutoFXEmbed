@@ -7,8 +7,8 @@
 //!
 //! ## Linux
 //!
-//! Uses the `tray-icon` crate (which wraps libayatana-appindicator / GTK).
-//! Menu events are delivered through a channel that the monitor loop polls.
+//! Uses `ksni` to expose a pure-Rust D-Bus StatusNotifierItem.
+//! Menu callbacks update shared state read by the monitor loop.
 
 // ---------------------------------------------------------------------------
 // Windows implementation (Win32)
@@ -17,18 +17,18 @@
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT};
 #[cfg(target_os = "windows")]
+use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::{
-    Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, IMAGE_ICON, LoadImageW,
-    LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DEFAULT, MF_SEPARATOR,
-    MF_STRING, MessageBoxW, TrackPopupMenu, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_TOPALIGN, WM_RBUTTONUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW,
+    SetForegroundWindow, TrackPopupMenu, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION,
+    MB_OK, MF_CHECKED, MF_DEFAULT, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
 };
-#[cfg(target_os = "windows")]
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 
 /// Custom message Windows sends to our window when the tray icon is interacted with.
 /// (WM_APP = 0x8000.)
@@ -46,7 +46,7 @@ const MENU_ABOUT: u32 = 3;
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
 #[cfg(target_os = "windows")]
-pub unsafe fn add(hwnd: HWND) {
+pub unsafe fn add(hwnd: HWND) -> bool {
     let tip = crate::clipboard::wide("AutoFxEmbed");
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
@@ -63,9 +63,13 @@ pub unsafe fn add(hwnd: HWND) {
         0,
         LR_DEFAULTSIZE | LR_SHARED,
     );
-    let n = tip.len().min(nid.szTip.len());
+    if nid.hIcon.is_null() {
+        eprintln!("AutoFxEmbed: failed to load tray icon");
+        return false;
+    }
+    let n = tip.len().min(nid.szTip.len().saturating_sub(1));
     nid.szTip[..n].copy_from_slice(&tip[..n]);
-    Shell_NotifyIconW(NIM_ADD, &nid);
+    Shell_NotifyIconW(NIM_ADD, &nid) != 0
 }
 
 /// # Safety
@@ -76,11 +80,13 @@ pub unsafe fn remove(hwnd: HWND) {
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uID = 1;
-    Shell_NotifyIconW(NIM_DELETE, &nid);
+    if Shell_NotifyIconW(NIM_DELETE, &nid) == 0 {
+        eprintln!("AutoFxEmbed: failed to remove tray icon");
+    }
 }
 
 /// Handle a tray callback message. `lparam`'s low word is the mouse event.
-/// On right-click we show a popup menu with "Quit".
+/// On right-click we show the startup, About, and Quit menu items.
 ///
 /// # Safety
 /// Calls Win32 menu/user32 APIs.
@@ -102,34 +108,54 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     }
 
     // Start on startup (checkable — check reflects current registry state).
-    let startup_flags = MF_STRING | if crate::autostart::is_enabled() { MF_CHECKED } else { 0 };
-    AppendMenuW(
+    let startup_flags = MF_STRING
+        | if crate::autostart::is_enabled() {
+            MF_CHECKED
+        } else {
+            0
+        };
+    if AppendMenuW(
         menu,
         startup_flags,
         MENU_STARTUP as usize,
         crate::clipboard::wide("Start on startup").as_ptr(),
-    );
-
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+    ) == 0
+        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
+    {
+        DestroyMenu(menu);
+        return;
+    }
 
     // About (bold — MF_DEFAULT marks it as the default menu item).
-    AppendMenuW(
+    if AppendMenuW(
         menu,
         MF_STRING | MF_DEFAULT,
         MENU_ABOUT as usize,
         crate::clipboard::wide("About").as_ptr(),
-    );
-
-    AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null());
+    ) == 0
+        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
+    {
+        DestroyMenu(menu);
+        return;
+    }
 
     // Quit.
-    AppendMenuW(
+    if AppendMenuW(
         menu,
         MF_STRING,
         MENU_QUIT as usize,
         crate::clipboard::wide("Quit").as_ptr(),
-    );
+    ) == 0
+    {
+        DestroyMenu(menu);
+        return;
+    }
 
+    // Win32 requires the owner window to be foreground for notification-area
+    // menus to dismiss correctly when the user clicks elsewhere.
+    if SetForegroundWindow(hwnd) == 0 {
+        eprintln!("AutoFxEmbed: failed to foreground tray menu owner");
+    }
     let cmd = TrackPopupMenu(
         menu,
         TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
@@ -236,13 +262,16 @@ impl KsniTray for LinuxTray {
                 label: "About".into(),
                 activate: Box::new(|_tray| {
                     // Best-effort desktop notification (ignore failures).
-                    let _ = std::process::Command::new("notify-send")
+                    if let Err(error) = std::process::Command::new("notify-send")
                         .args([
                             "--app-name=AutoFxEmbed",
                             "About AutoFxEmbed",
                             "Made by Cris with much <3 for his friends",
                         ])
-                        .spawn();
+                        .spawn()
+                    {
+                        eprintln!("AutoFxEmbed: unable to show About notification: {error}");
+                    }
                 }),
                 ..Default::default()
             }
@@ -262,11 +291,11 @@ impl KsniTray for LinuxTray {
 
 /// Spawn the D-Bus tray service and return the handle + quit flag.
 #[cfg(target_os = "linux")]
-pub fn spawn() -> (Handle<LinuxTray>, Arc<AtomicBool>) {
+pub fn spawn() -> Result<(Handle<LinuxTray>, Arc<AtomicBool>), ksni::Error> {
     let quit = Arc::new(AtomicBool::new(false));
     let tray = LinuxTray {
         quit_requested: quit.clone(),
     };
-    let handle = tray.spawn().expect("ksni tray should spawn on Linux");
-    (handle, quit)
+    let handle = tray.spawn()?;
+    Ok((handle, quit))
 }
