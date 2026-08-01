@@ -11,8 +11,8 @@
 //!
 //! Uses `ksni` (pure-Rust D-Bus StatusNotifierItem) for the tray icon —
 //! zero X11/GTK dependencies, works on both X11 and Wayland.
-//! Clipboard is polled on a simple sleep loop; tray menu events are handled
-//! via the `activate` callbacks on each menu item.
+//! On native X11 sessions, XFixes selection-owner events wake clipboard
+//! processing; Wayland and unknown environments use a slower fallback poll.
 
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
@@ -226,13 +226,157 @@ mod win {
 mod linux_impl {
     use super::*;
     use std::{
-        sync::atomic::Ordering,
+        sync::{
+            atomic::Ordering,
+            mpsc::{self, Receiver, RecvTimeoutError},
+        },
+        thread,
         time::{Duration, Instant},
     };
+    use x11rb::{
+        connection::Connection,
+        protocol::{
+            xfixes::{ConnectionExt as XfixesConnectionExt, SelectionEvent, SelectionEventMask},
+            xproto::{self, ConnectionExt as XprotoConnectionExt},
+            Event,
+        },
+        rust_connection::RustConnection,
+    };
 
-    /// Poll interval for clipboard checks (milliseconds).
-    /// 100 ms gives near-instant response while keeping CPU usage negligible.
-    const POLL_MS: u64 = 100;
+    /// Poll interval for Wayland and other environments without a watcher.
+    /// Native X11 sessions use XFixes events, with a slow safety read because
+    /// XFixes does not report content changes made by the same owner.
+    const FALLBACK_POLL: Duration = Duration::from_millis(500);
+    const X11_SAFETY_POLL: Duration = Duration::from_secs(5);
+    const QUIT_CHECK: Duration = Duration::from_millis(100);
+
+    struct X11Watcher {
+        changes: Receiver<()>,
+        shutdown_connection: RustConnection,
+        shutdown_atom: xproto::Atom,
+        shutdown_window: xproto::Window,
+        thread: thread::JoinHandle<()>,
+    }
+
+    impl X11Watcher {
+        fn shutdown(self) {
+            // Claim a private selection to wake the blocking watcher with a
+            // guaranteed owner-change event, even if it was previously empty.
+            let X11Watcher {
+                changes: _,
+                shutdown_connection,
+                shutdown_atom,
+                shutdown_window,
+                thread,
+            } = self;
+            let _ = shutdown_connection.set_selection_owner(
+                shutdown_window,
+                shutdown_atom,
+                x11rb::CURRENT_TIME,
+            );
+            let _ = shutdown_connection.flush();
+            let _ = thread.join();
+            let _ = shutdown_connection.destroy_window(shutdown_window);
+            let _ = shutdown_connection.flush();
+        }
+
+        fn join(self) {
+            let X11Watcher {
+                changes: _,
+                shutdown_connection,
+                shutdown_atom: _,
+                shutdown_window,
+                thread,
+            } = self;
+            let _ = thread.join();
+            let _ = shutdown_connection.destroy_window(shutdown_window);
+            let _ = shutdown_connection.flush();
+        }
+    }
+
+    /// Start an XFixes watcher when the native desktop session is X11.
+    ///
+    /// Wayland deliberately falls through: ordinary Wayland clients cannot
+    /// passively observe global clipboard ownership without compositor-specific
+    /// protocols, while arboard remains the portable read/write implementation.
+    fn start_x11_watcher() -> Option<X11Watcher> {
+        if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            return None;
+        }
+
+        let (connection, screen_num) = x11rb::connect(None).ok()?;
+        let root = connection.setup().roots.get(screen_num)?.root;
+        let (shutdown_connection, shutdown_screen_num) = x11rb::connect(None).ok()?;
+        let shutdown_screen = shutdown_connection.setup().roots.get(shutdown_screen_num)?;
+        let shutdown_window = shutdown_connection.generate_id().ok()?;
+        shutdown_connection
+            .create_window(
+                0,
+                shutdown_window,
+                shutdown_screen.root,
+                0,
+                0,
+                1,
+                1,
+                0,
+                xproto::WindowClass::INPUT_ONLY,
+                0,
+                &xproto::CreateWindowAux::new(),
+            )
+            .ok()?
+            .check()
+            .ok()?;
+        shutdown_connection.flush().ok()?;
+        connection.xfixes_query_version(5, 0).ok()?.reply().ok()?;
+        let clipboard_atom = connection
+            .intern_atom(false, b"CLIPBOARD")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        let shutdown_atom = connection
+            .intern_atom(false, b"AUTOFXEMBED_SHUTDOWN")
+            .ok()?
+            .reply()
+            .ok()?
+            .atom;
+        for selection in [clipboard_atom, shutdown_atom] {
+            connection
+                .xfixes_select_selection_input(
+                    root,
+                    selection,
+                    SelectionEventMask::SET_SELECTION_OWNER,
+                )
+                .ok()?
+                .check()
+                .ok()?;
+        }
+        connection.flush().ok()?;
+
+        let (sender, receiver) = mpsc::channel();
+        let watcher_thread = thread::spawn(move || {
+            while let Ok(event) = connection.wait_for_event() {
+                if let Event::XfixesSelectionNotify(event) = event {
+                    if event.selection == shutdown_atom {
+                        break;
+                    }
+                    if event.selection == clipboard_atom
+                        && event.subtype == SelectionEvent::SET_SELECTION_OWNER
+                        && sender.send(()).is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+        Some(X11Watcher {
+            changes: receiver,
+            shutdown_connection,
+            shutdown_atom,
+            shutdown_window,
+            thread: watcher_thread,
+        })
+    }
 
     pub fn run() {
         let (tray_handle, quit_flag) = match crate::tray::spawn() {
@@ -260,37 +404,87 @@ mod linux_impl {
         let mut last_text = String::new();
         let mut failed_text: Option<String> = None;
         let mut retry_at = Instant::now();
+        let mut x11_watcher = start_x11_watcher();
+        let mut next_safety_poll = Instant::now();
 
         loop {
             if quit_flag.load(Ordering::SeqCst) {
                 break;
             }
 
-            // ---- clipboard polling ----
-            if let Ok(text) = clipboard.get_text() {
-                if text != last_text
-                    && (failed_text.as_deref() != Some(text.as_str()) || Instant::now() >= retry_at)
-                {
-                    if let Some(new_text) = transform_text(&text) {
-                        match clipboard.set_text(&new_text) {
-                            Ok(()) => {
-                                last_text = new_text;
-                                failed_text = None;
-                            }
-                            Err(error) => {
-                                failed_text = Some(text.clone());
-                                retry_at = Instant::now() + Duration::from_secs(1);
-                                eprintln!("AutoFxEmbed: clipboard write failed: {error}");
-                            }
+            let (watcher_disconnected, process_clipboard, safety_poll_due) = match x11_watcher
+                .as_ref()
+            {
+                Some(watcher) => {
+                    let now = Instant::now();
+                    let safety_wait = next_safety_poll.saturating_duration_since(now);
+                    let retry_wait = failed_text
+                        .as_ref()
+                        .map(|_| retry_at.saturating_duration_since(now))
+                        .unwrap_or(Duration::MAX);
+
+                    let wait_until = safety_wait.min(retry_wait).min(QUIT_CHECK);
+                    match watcher.changes.recv_timeout(wait_until) {
+                        Ok(()) => {
+                            // Coalesce a burst of owner changes into one read.
+                            watcher.changes.try_iter().for_each(drop);
+                            (false, true, false)
                         }
-                    } else {
-                        last_text = text;
-                        failed_text = None;
+                        Err(RecvTimeoutError::Timeout) => {
+                            let safety_due = safety_wait <= wait_until;
+                            let retry_due = retry_wait <= wait_until;
+                            (false, safety_due || retry_due, safety_due)
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
+                            eprintln!("AutoFxEmbed: X11 clipboard watcher stopped; using fallback polling");
+                            (true, true, false)
+                        }
+                    }
+                }
+                None => {
+                    thread::sleep(FALLBACK_POLL);
+                    (false, true, false)
+                }
+            };
+            if watcher_disconnected {
+                if let Some(watcher) = x11_watcher.take() {
+                    watcher.join();
+                }
+            }
+            if safety_poll_due {
+                next_safety_poll = Instant::now() + X11_SAFETY_POLL;
+            }
+
+            // ---- clipboard processing ----
+            if process_clipboard {
+                if let Ok(text) = clipboard.get_text() {
+                    if text != last_text
+                        && (failed_text.as_deref() != Some(text.as_str())
+                            || Instant::now() >= retry_at)
+                    {
+                        if let Some(new_text) = transform_text(&text) {
+                            match clipboard.set_text(&new_text) {
+                                Ok(()) => {
+                                    last_text = new_text;
+                                    failed_text = None;
+                                }
+                                Err(error) => {
+                                    failed_text = Some(text.clone());
+                                    retry_at = Instant::now() + Duration::from_secs(1);
+                                    eprintln!("AutoFxEmbed: clipboard write failed: {error}");
+                                }
+                            }
+                        } else {
+                            last_text = text;
+                            failed_text = None;
+                        }
                     }
                 }
             }
+        }
 
-            std::thread::sleep(Duration::from_millis(POLL_MS));
+        if let Some(watcher) = x11_watcher {
+            watcher.shutdown();
         }
 
         // Graceful shutdown: unregister from D-Bus and wait.

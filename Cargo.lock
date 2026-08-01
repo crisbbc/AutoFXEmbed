@@ -78,6 +78,7 @@ dependencies = [
  "image",
  "ksni",
  "windows-sys 0.61.2",
+ "x11rb",
 ]
 
 [[package]]

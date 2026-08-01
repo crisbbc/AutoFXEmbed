@@ -22,6 +22,7 @@ windows-sys = { version = "0.61", features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 ksni = { version = "0.3", features = ["blocking"] }
 dirs = "5"
+x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
 
 [build-dependencies]
 embed-resource = "2"

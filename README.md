@@ -20,8 +20,9 @@ non-matching URLs are left untouched; supported links embedded in prose are
 rewritten in place.
 
 On Windows it uses the clipboard format listener, so it wakes only on real
-clipboard changes — no polling, no CPU at idle. On Linux it polls every 100 ms
-for desktop compatibility. A system-tray icon (the FxEmbed logo)
+clipboard changes — no polling, no CPU at idle. On native X11 sessions, Linux
+uses XFixes selection-owner events plus a slow safety read; Wayland and other
+environments use a 500 ms fallback poll. A system-tray icon (the FxEmbed logo)
 provides a right-click menu with **Start on startup**, a bold **About**, and
 **Quit**.
 
