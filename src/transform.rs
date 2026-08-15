@@ -7,7 +7,10 @@ const RULES: &[(&str, &str)] = &[
 
 /// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
 fn host_matches(host: &str, domain: &str) -> bool {
-    host == domain || host.ends_with(&format!(".{}", domain))
+    host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
 /// Return the byte range of the hostname within a URL authority.
@@ -95,35 +98,34 @@ pub fn transform_text(text: &str) -> Option<String> {
 /// Returns `None` when no token changed (so the clipboard is left alone and we
 /// avoid a re-write loop).
 fn transform_embedded(text: &str) -> Option<String> {
-    let mut out = String::with_capacity(text.len() + 8);
-    let mut changed = false;
-    let mut rest = text;
+    // Cheap dry run: most clipboard changes contain no supported URL, so
+    // detect that up front and return without allocating in that common case.
+    if !text
+        .split_whitespace()
+        .any(|token| transform_clipboard(token).is_some())
+    {
+        return None;
+    }
 
+    // Rebuild the text, rewriting each matching token and preserving all
+    // surrounding whitespace verbatim.
+    let mut out = String::with_capacity(text.len() + 8);
+    let mut rest = text;
     while !rest.is_empty() {
         // Leading whitespace run: copy it verbatim.
-        let after_ws = rest.trim_start_matches(|c: char| c.is_whitespace());
-        let ws_len = rest.len() - after_ws.len();
-        out.push_str(&rest[..ws_len]);
+        let after_ws = rest.trim_start_matches(char::is_whitespace);
+        out.push_str(&rest[..rest.len() - after_ws.len()]);
         rest = after_ws;
         if rest.is_empty() {
             break;
         }
         // Next token: everything up to the next whitespace char (or end).
-        let tok_end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
-        let token = &rest[..tok_end];
-        match transform_clipboard(token) {
-            Some(rewritten) => {
-                out.push_str(&rewritten);
-                changed = true;
-            }
-            None => out.push_str(token),
+        let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        match transform_clipboard(&rest[..end]) {
+            Some(rewritten) => out.push_str(&rewritten),
+            None => out.push_str(&rest[..end]),
         }
-        rest = &rest[tok_end..];
+        rest = &rest[end..];
     }
-
-    if changed {
-        Some(out)
-    } else {
-        None
-    }
+    Some(out)
 }
