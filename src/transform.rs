@@ -1,9 +1,22 @@
 /// (original host, FxEmbed host) rewrite rules, in priority order.
-const RULES: &[(&str, &str)] = &[
+pub(crate) const FIXUP_RULES: &[(&str, &str)] = &[
     ("twitter.com", "fxtwitter.com"),
     ("x.com", "fixupx.com"),
     ("bsky.app", "fxbsky.app"),
 ];
+pub(crate) const BOY_RULES: &[(&str, &str)] = &[
+    ("twitter.com", "boypussyx.com"),
+    ("x.com", "boypussyx.com"),
+    ("bsky.app", "fxbsky.app"),
+];
+
+fn rules() -> &'static [(&'static str, &'static str)] {
+    if crate::config::is_boypussyx() {
+        BOY_RULES
+    } else {
+        FIXUP_RULES
+    }
+}
 
 /// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
 fn host_matches(host: &str, domain: &str) -> bool {
@@ -31,6 +44,11 @@ fn authority_host_range(authority: &str) -> Option<(usize, usize)> {
 /// If `text` is a single X/Twitter/Bluesky URL, return the FxEmbed form.
 /// Otherwise return `None` (leave the clipboard untouched).
 pub fn transform_clipboard(text: &str) -> Option<String> {
+    transform_clipboard_with(text, rules())
+}
+
+/// Same as [`transform_clipboard`] but with an explicit rule set (for tests).
+pub(crate) fn transform_clipboard_with(text: &str, rules: &[(&str, &str)]) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -60,7 +78,7 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
     let (host_start, host_end) = authority_host_range(authority)?;
     let host = &authority[host_start..host_end];
 
-    for &(domain, replacement) in RULES {
+    for &(domain, replacement) in rules {
         if host_matches(host, domain) {
             let domain_start = host_end - domain.len();
             let mut result =
@@ -75,6 +93,7 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
     }
     None
 }
+
 
 /// If `text` is a single supported URL, OR contains one or more supported URLs
 /// embedded in surrounding text, return `text` with every such URL rewritten to

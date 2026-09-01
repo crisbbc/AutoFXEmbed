@@ -48,7 +48,27 @@ mod win {
     /// (WM_APP is 0x8000; we use 0x8002 to leave room for the tray callback at 0x8001.)
     const WM_DO_WRITE: u32 = 0x8002;
 
+    /// `HWND` is `*mut c_void`, which isn't `Send`. Store it as `usize`
+    /// (trivially `Send`) and cast back when posting — we never dereference it.
+    struct SendHwnd(usize);
+    impl SendHwnd {
+        fn new(hwnd: HWND) -> Self {
+            Self(hwnd as usize)
+        }
+        fn post_message(&self, msg: u32, wparam: WPARAM, lparam: LPARAM) -> bool {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    self.0 as HWND,
+                    msg,
+                    wparam,
+                    lparam,
+                ) != 0
+            }
+        }
+    }
+
     /// Entry point: set up the window + listener, run the message loop, clean up.
+
     pub fn run() {
         unsafe {
             let class_name = clipboard::wide("AutoFxEmbedListener");
@@ -122,24 +142,26 @@ mod win {
         wparam: WPARAM,
         lparam: LPARAM,
     ) -> LRESULT {
-        match msg {
-            WM_CLIPBOARDUPDATE => {
-                handle_clipboard_update_win(hwnd);
-                0
+        unsafe {
+            match msg {
+                WM_CLIPBOARDUPDATE => {
+                    handle_clipboard_update_win(hwnd);
+                    0
+                }
+                WM_DO_WRITE => {
+                    do_pending_write_win(hwnd);
+                    0
+                }
+                crate::tray::TRAY_CALLBACK_MSG => {
+                    crate::tray::handle_event(hwnd, lparam);
+                    0
+                }
+                WM_DESTROY => {
+                    PostQuitMessage(0);
+                    0
+                }
+                _ => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
-            WM_DO_WRITE => {
-                do_pending_write_win(hwnd);
-                0
-            }
-            crate::tray::TRAY_CALLBACK_MSG => {
-                crate::tray::handle_event(hwnd, lparam);
-                0
-            }
-            WM_DESTROY => {
-                PostQuitMessage(0);
-                0
-            }
-            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
     }
 
@@ -147,35 +169,42 @@ mod win {
     /// changed, stashes the new text and POSTS a message to write it later (so we
     /// don't re-enter the clipboard during the update broadcast).
     unsafe fn handle_clipboard_update_win(hwnd: HWND) {
-        let text = (0..3).find_map(|attempt| {
-            let text = clipboard::read_text();
-            if text.is_none() && attempt < 2 {
-                std::thread::sleep(std::time::Duration::from_millis(10));
+        unsafe {
+            let text = (0..3).find_map(|attempt| {
+                let text = clipboard::read_text();
+                if text.is_none() && attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                text
+            });
+            let Some(text) = text else {
+                eprintln!("AutoFxEmbed: unable to read clipboard text");
+                return;
+            };
+            let Some(new_text) = transform_text(&text) else {
+                return;
+            };
+            if let Ok(mut guard) = PENDING_WRITE.lock() {
+                *guard = Some(new_text);
+                if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_DO_WRITE,
+                    0,
+                    0,
+                ) == 0
+                {
+                    *guard = None;
+                    eprintln!("AutoFxEmbed: failed to schedule clipboard write");
+                }
+            } else {
+                eprintln!("AutoFxEmbed: clipboard write queue is unavailable");
             }
-            text
-        });
-        let Some(text) = text else {
-            eprintln!("AutoFxEmbed: unable to read clipboard text");
-            return;
-        };
-        let Some(new_text) = transform_text(&text) else {
-            return;
-        };
-        if let Ok(mut guard) = PENDING_WRITE.lock() {
-            *guard = Some(new_text);
-            if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(hwnd, WM_DO_WRITE, 0, 0)
-                == 0
-            {
-                *guard = None;
-                eprintln!("AutoFxEmbed: failed to schedule clipboard write");
-            }
-        } else {
-            eprintln!("AutoFxEmbed: clipboard write queue is unavailable");
         }
     }
 
     /// Retry a failed write later without blocking the Windows message loop.
     fn retry_pending_write(hwnd: HWND, text: String) {
+        let hwnd = SendHwnd::new(hwnd);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
             let Ok(mut guard) = PENDING_WRITE.lock() else {
@@ -187,33 +216,27 @@ mod win {
                 return;
             }
             *guard = Some(text);
-            unsafe {
-                if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
-                    hwnd,
-                    WM_DO_WRITE,
-                    0,
-                    0,
-                ) == 0
-                {
-                    *guard = None;
-                    eprintln!("AutoFxEmbed: failed to reschedule clipboard write");
-                }
+            if !hwnd.post_message(WM_DO_WRITE, 0, 0) {
+                *guard = None;
+                eprintln!("AutoFxEmbed: failed to reschedule clipboard write");
             }
         });
     }
 
     /// Runs in the deferred WM_DO_WRITE handler, outside the update broadcast.
     unsafe fn do_pending_write_win(hwnd: HWND) {
-        let to_write = PENDING_WRITE.lock().ok().and_then(|mut g| g.take());
-        if let Some(new_text) = to_write {
-            for _ in 0..3 {
-                if clipboard::write_text(&new_text) {
-                    return;
+        unsafe {
+            let to_write = PENDING_WRITE.lock().ok().and_then(|mut g| g.take());
+            if let Some(new_text) = to_write {
+                for _ in 0..3 {
+                    if clipboard::write_text(&new_text) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(10));
+                eprintln!("AutoFxEmbed: clipboard write busy; retrying later");
+                retry_pending_write(hwnd, new_text);
             }
-            eprintln!("AutoFxEmbed: clipboard write busy; retrying later");
-            retry_pending_write(hwnd, new_text);
         }
     }
 }
@@ -246,7 +269,7 @@ mod linux_impl {
     /// Poll interval for Wayland and other environments without a watcher.
     /// Native X11 sessions use XFixes events, with a slow safety read because
     /// XFixes does not report content changes made by the same owner.
-    const FALLBACK_POLL: Duration = Duration::from_millis(500);
+    const FALLBACK_POLL: Duration = Duration::from_millis(30);
     const X11_SAFETY_POLL: Duration = Duration::from_secs(5);
     const QUIT_CHECK: Duration = Duration::from_millis(100);
 
@@ -378,6 +401,31 @@ mod linux_impl {
         })
     }
 
+    /// Read the PRIMARY selection (mouse selection / middle-click paste).
+    /// Some apps publish copies only here; if Wayland is unavailable (pure X11
+    /// session) this simply returns None and clipboard-only behavior stays.
+    fn primary_text() -> Option<String> {
+        use std::io::Read;
+        use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
+        let mut pipe = get_contents(ClipboardType::Primary, Seat::Unspecified, MimeType::Text)
+            .ok()?
+            .0;
+        let mut buf = Vec::new();
+        pipe.read_to_end(&mut buf).ok()?;
+        Some(String::from_utf8_lossy(&buf).into_owned())
+    }
+
+    /// Write the PRIMARY selection (best effort — Wayland only).
+    fn set_primary(text: &str) {
+        use wl_clipboard_rs::copy::{ClipboardType, MimeType, Options, Source};
+        let source = Source::Bytes(text.as_bytes().to_vec().into_boxed_slice());
+        let mut opts = Options::new();
+        opts.clipboard(ClipboardType::Primary);
+        if let Err(e) = opts.copy(source, MimeType::Text) {
+            eprintln!("AutoFxEmbed: primary write failed: {e}");
+        }
+    }
+
     pub fn run() {
         let (tray_handle, quit_flag) = match crate::tray::spawn() {
             Ok((handle, quit)) => (handle, quit),
@@ -402,8 +450,10 @@ mod linux_impl {
         // Track the last clipboard text we saw so we can detect real changes
         // (and avoid re-writing our own transformed text back into the loop).
         let mut last_text = String::new();
+        let mut last_primary = String::new();
         let mut failed_text: Option<String> = None;
         let mut retry_at = Instant::now();
+        let mut was_empty = false;
         let mut x11_watcher = start_x11_watcher();
         let mut next_safety_poll = Instant::now();
 
@@ -457,26 +507,67 @@ mod linux_impl {
 
             // ---- clipboard processing ----
             if process_clipboard {
-                if let Ok(text) = clipboard.get_text() {
-                    if text != last_text
-                        && (failed_text.as_deref() != Some(text.as_str())
-                            || Instant::now() >= retry_at)
-                    {
-                        if let Some(new_text) = transform_text(&text) {
-                            match clipboard.set_text(&new_text) {
-                                Ok(()) => {
-                                    last_text = new_text;
-                                    failed_text = None;
+                // CLIPBOARD selection (Ctrl+C, copy buttons).
+                match clipboard.get_text() {
+                    Ok(text) => {
+                        if text != last_text {
+                            was_empty = false;
+                            let preview: String = text.chars().take(80).collect();
+                            eprintln!("AutoFxEmbed: read -> {:?}", preview);
+                        }
+                        if text != last_text
+                            && (failed_text.as_deref() != Some(text.as_str())
+                                || Instant::now() >= retry_at)
+                        {
+                            if let Some(new_text) = transform_text(&text) {
+                                eprintln!(
+                                    "AutoFxEmbed: {} -> {}",
+                                    &text[..text.len().min(80)],
+                                    &new_text[..new_text.len().min(80)]
+                                );
+                                match clipboard.set_text(&new_text) {
+                                    Ok(()) => {
+                                        set_primary(&new_text);
+                                        last_text = new_text;
+                                        failed_text = None;
+                                    }
+                                    Err(error) => {
+                                        failed_text = Some(text.clone());
+                                        retry_at = Instant::now() + Duration::from_secs(1);
+                                        eprintln!("AutoFxEmbed: clipboard write failed: {error}");
+                                    }
                                 }
-                                Err(error) => {
-                                    failed_text = Some(text.clone());
-                                    retry_at = Instant::now() + Duration::from_secs(1);
-                                    eprintln!("AutoFxEmbed: clipboard write failed: {error}");
-                                }
+                            } else {
+                                last_text = text;
+                                failed_text = None;
                             }
+                        }
+                    }
+                    Err(_) => {
+                        if !was_empty {
+                            eprintln!("AutoFxEmbed: read error: clipboard empty/unavailable");
+                            was_empty = true;
+                        }
+                    }
+                }
+
+                // PRIMARY selection (mouse selection / middle-click paste) — some
+                // apps (notably Chromium-family browsers like Helium) publish copies
+                // there instead of the CLIPBOARD selection.
+                if let Some(text) = primary_text() {
+                    if text != last_primary && text != last_text {
+                        if let Some(new_text) = transform_text(&text) {
+                            eprintln!(
+                                "AutoFxEmbed: primary {} -> {}",
+                                &text[..text.len().min(80)],
+                                &new_text[..new_text.len().min(80)]
+                            );
+                            let _ = clipboard.set_text(&new_text);
+                            set_primary(&new_text);
+                            last_primary = new_text.clone();
+                            last_text = new_text;
                         } else {
-                            last_text = text;
-                            failed_text = None;
+                            last_primary = text;
                         }
                     }
                 }
@@ -496,8 +587,24 @@ mod linux_impl {
 // Public entry point
 // =========================================================================
 
+/// Keep a single instance: two instances racing on clipboard rewrites produce
+/// "sometimes transforms, sometimes not" behavior.
+/// The OS file lock auto-releases when the process dies, so no stale locks.
+fn lock_single_instance() -> Option<std::fs::File> {
+    let path = std::env::temp_dir().join("autofxembed.lock");
+    let file = std::fs::File::create(&path).ok()?;
+    match file.try_lock() {
+        Ok(()) => Some(file),
+        Err(_) => None,
+    }
+}
 /// Start the clipboard monitor + tray icon.  Blocks until the user quits.
 pub fn run() {
+    let Some(_single_instance) = lock_single_instance() else {
+        eprintln!("AutoFxEmbed: another instance is already running; exiting");
+        return;
+    };
+    crate::config::load();
     #[cfg(target_os = "windows")]
     win::run();
 
