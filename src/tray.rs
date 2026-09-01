@@ -26,8 +26,8 @@ use windows_sys::Win32::UI::Shell::{
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW,
     SetForegroundWindow, TrackPopupMenu, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION,
-    MB_OK, MF_CHECKED, MF_DEFAULT, MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_NONOTIFY,
-    TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
+    MB_OK, MF_CHECKED, MF_DEFAULT, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
+    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
 };
 
 /// Custom message Windows sends to our window when the tray icon is interacted with.
@@ -42,6 +42,10 @@ const MENU_QUIT: u32 = 1;
 const MENU_STARTUP: u32 = 2;
 #[cfg(target_os = "windows")]
 const MENU_ABOUT: u32 = 3;
+#[cfg(target_os = "windows")]
+const MENU_FIXUP: u32 = 4;
+#[cfg(target_os = "windows")]
+const MENU_BOY: u32 = 5;
 
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
@@ -107,6 +111,56 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
+    // Categories — X submenu holds the selector, other categories greyed out for now.
+    let x_submenu = CreatePopupMenu();
+    if x_submenu.is_null() {
+        DestroyMenu(menu);
+        return;
+    }
+    let fixup_checked = if crate::config::is_boypussyx() { 0 } else { MF_CHECKED };
+    let boy_checked = if crate::config::is_boypussyx() { MF_CHECKED } else { 0 };
+    if AppendMenuW(
+        x_submenu,
+        MF_STRING | fixup_checked,
+        MENU_FIXUP as usize,
+        crate::clipboard::wide("FixUpX (fxtwitter / fixupx)").as_ptr(),
+    ) == 0
+        || AppendMenuW(
+            x_submenu,
+            MF_STRING | boy_checked,
+            MENU_BOY as usize,
+            crate::clipboard::wide("BoyPussyX (boypussyx.com)").as_ptr(),
+        ) == 0
+    {
+        DestroyMenu(x_submenu);
+        DestroyMenu(menu);
+        return;
+    }
+    if AppendMenuW(
+        menu,
+        MF_STRING | MF_POPUP,
+        x_submenu as usize,
+        crate::clipboard::wide("X / Twitter \u{25B6}").as_ptr(),
+    ) == 0
+        || AppendMenuW(
+            menu,
+            MF_STRING | MF_GRAYED | MF_DISABLED,
+            0,
+            crate::clipboard::wide("Instagram (coming soon)").as_ptr(),
+        ) == 0
+        || AppendMenuW(
+            menu,
+            MF_STRING | MF_GRAYED | MF_DISABLED,
+            0,
+            crate::clipboard::wide("TikTok (coming soon)").as_ptr(),
+        ) == 0
+        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
+    {
+        DestroyMenu(menu);
+        return;
+    }
+
+
     // Start on startup (checkable — check reflects current registry state).
     let startup_flags = MF_STRING
         | if crate::autostart::is_enabled() {
@@ -168,6 +222,8 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     DestroyMenu(menu);
 
     match cmd as u32 {
+        MENU_FIXUP => crate::config::set_boypussyx(false),
+        MENU_BOY => crate::config::set_boypussyx(true),
         MENU_STARTUP => {
             crate::autostart::toggle();
         }
@@ -199,7 +255,7 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 use ksni::{
     blocking::{Handle, TrayMethods},
-    menu::{CheckmarkItem, MenuItem, StandardItem},
+    menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu},
     Icon, Tray as KsniTray,
 };
 
@@ -247,7 +303,52 @@ impl KsniTray for LinuxTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
+        let is_boy = crate::config::is_boypussyx();
         vec![
+            SubMenu {
+                label: "X / Twitter".into(),
+                submenu: vec![
+                    StandardItem {
+                        label: if !is_boy {
+                            "✓ FixUpX (fxtwitter / fixupx)".into()
+                        } else {
+                            "  FixUpX (fxtwitter / fixupx)".into()
+                        },
+                        activate: Box::new(|_tray| {
+                            crate::config::set_boypussyx(false);
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                    StandardItem {
+                        label: if is_boy {
+                            "✓ BoyPussyX (boypussyx.com)".into()
+                        } else {
+                            "  BoyPussyX (boypussyx.com)".into()
+                        },
+                        activate: Box::new(|_tray| {
+                            crate::config::set_boypussyx(true);
+                        }),
+                        ..Default::default()
+                    }
+                    .into(),
+                ],
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Instagram (coming soon)".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "TikTok (coming soon)".into(),
+                enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
             CheckmarkItem {
                 label: "Start on startup".into(),
                 checked: crate::autostart::is_enabled(),
