@@ -1,8 +1,10 @@
 # AutoFxEmbed
 
 A tiny Windows background utility that watches your clipboard and rewrites
-X / Twitter / Bluesky links into their [FxEmbed](https://github.com/FxEmbed/FxEmbed)
-form so Discord, Telegram, etc. embed them properly.
+X / Twitter / Bluesky links through [FxEmbed](https://github.com/FxEmbed/FxEmbed), and
+Instagram links through [Instagram7](https://www.instagram7.com/), and TikTok links through
+[fxTikTok](https://github.com/okdargy/fxtiktok) so Discord, Telegram, etc. embed them
+properly.
 
 ## What it does
 
@@ -13,6 +15,8 @@ When the clipboard contains one or more links to one of these services:
 | `twitter.com`   | `fxtwitter.com`  |
 | `x.com`         | `fixupx.com`     |
 | `bsky.app`      | `fxbsky.app`     |
+| `instagram.com` | `instagram7.com` |
+| `tiktok.com`    | `tnktok.com`     |
 
 …everything else in the URL (subdomain, optional port, path, query, fragment) is
 preserved and the clipboard is updated in place. Already-transformed links,
@@ -57,7 +61,7 @@ Visual Studio Build Tools).
 Double-click `autofxembed.exe` (no console window appears; a tray icon does).
 On Linux, a missing D-Bus StatusNotifier tray is treated as a startup failure
 rather than leaving an unmanageable background process running.
-Copy a tweet/X/Bluesky link; paste it anywhere — it's already the FxEmbed form.
+Copy an X/Twitter, Bluesky, Instagram, or TikTok link; paste it anywhere — it's already embed-friendly.
 Right-click the tray icon for:
 
 - **Start on startup** — checked when AutoFxEmbed will launch at Windows logon

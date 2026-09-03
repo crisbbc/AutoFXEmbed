@@ -25,6 +25,22 @@ fn transforms_bsky_https() {
 }
 
 #[test]
+fn transforms_instagram_https() {
+    assert_eq!(
+        transform_clipboard("https://www.instagram.com/reel/ABC123/?utm_source=ig_web_copy_link"),
+        Some("https://www.instagram7.com/reel/ABC123/?utm_source=ig_web_copy_link".to_string())
+    );
+}
+
+#[test]
+fn transforms_tiktok_https() {
+    assert_eq!(
+        transform_clipboard("https://www.tiktok.com/@creator/video/123456789?is_from_webapp=1"),
+        Some("https://www.tnktok.com/@creator/video/123456789?is_from_webapp=1".to_string())
+    );
+}
+
+#[test]
 fn transforms_http_scheme() {
     assert_eq!(
         transform_clipboard("http://twitter.com/foo"),
