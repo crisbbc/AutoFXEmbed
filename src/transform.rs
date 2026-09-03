@@ -1,13 +1,17 @@
-/// (original host, FxEmbed host) rewrite rules, in priority order.
+/// (original host, embed-friendly host) rewrite rules, in priority order.
 pub(crate) const FIXUP_RULES: &[(&str, &str)] = &[
     ("twitter.com", "fxtwitter.com"),
     ("x.com", "fixupx.com"),
     ("bsky.app", "fxbsky.app"),
+    ("instagram.com", "instagram7.com"),
+    ("tiktok.com", "tnktok.com"),
 ];
 pub(crate) const BOY_RULES: &[(&str, &str)] = &[
     ("twitter.com", "boypussyx.com"),
     ("x.com", "boypussyx.com"),
     ("bsky.app", "fxbsky.app"),
+    ("instagram.com", "instagram7.com"),
+    ("tiktok.com", "tnktok.com"),
 ];
 
 fn rules() -> &'static [(&'static str, &'static str)] {
@@ -41,7 +45,7 @@ fn authority_host_range(authority: &str) -> Option<(usize, usize)> {
     }
 }
 
-/// If `text` is a single X/Twitter/Bluesky URL, return the FxEmbed form.
+/// If `text` is a single supported social-media URL, return its embed-friendly form.
 /// Otherwise return `None` (leave the clipboard untouched).
 pub fn transform_clipboard(text: &str) -> Option<String> {
     transform_clipboard_with(text, rules())

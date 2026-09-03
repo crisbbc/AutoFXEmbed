@@ -111,7 +111,7 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
-    // Categories — X submenu holds the selector, other categories greyed out for now.
+    // X has a configurable submenu; fixed and upcoming providers are informational.
     let x_submenu = CreatePopupMenu();
     if x_submenu.is_null() {
         DestroyMenu(menu);
@@ -146,13 +146,13 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
             menu,
             MF_STRING | MF_GRAYED | MF_DISABLED,
             0,
-            crate::clipboard::wide("Instagram (coming soon)").as_ptr(),
+            crate::clipboard::wide("Instagram (instagram7.com)").as_ptr(),
         ) == 0
         || AppendMenuW(
             menu,
             MF_STRING | MF_GRAYED | MF_DISABLED,
             0,
-            crate::clipboard::wide("TikTok (coming soon)").as_ptr(),
+            crate::clipboard::wide("TikTok (tnktok.com)").as_ptr(),
         ) == 0
         || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
     {
@@ -337,13 +337,13 @@ impl KsniTray for LinuxTray {
             }
             .into(),
             StandardItem {
-                label: "Instagram (coming soon)".into(),
+                label: "Instagram (instagram7.com)".into(),
                 enabled: false,
                 ..Default::default()
             }
             .into(),
             StandardItem {
-                label: "TikTok (coming soon)".into(),
+                label: "TikTok (tnktok.com)".into(),
                 enabled: false,
                 ..Default::default()
             }
