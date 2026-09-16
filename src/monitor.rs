@@ -24,7 +24,13 @@ use crate::transform::transform_text;
 /// Handoff between the clipboard-update handler and the deferred writer
 /// (Windows only — on Linux we write directly from the poll callback).
 #[cfg(target_os = "windows")]
-static PENDING_WRITE: Mutex<Option<String>> = Mutex::new(None);
+struct PendingWrite {
+    source: String,
+    replacement: String,
+}
+
+#[cfg(target_os = "windows")]
+static PENDING_WRITE: Mutex<Option<PendingWrite>> = Mutex::new(None);
 
 // =========================================================================
 // Windows
@@ -185,7 +191,10 @@ mod win {
                 return;
             };
             if let Ok(mut guard) = PENDING_WRITE.lock() {
-                *guard = Some(new_text);
+                *guard = Some(PendingWrite {
+                    source: text,
+                    replacement: new_text,
+                });
                 if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
                     hwnd,
                     WM_DO_WRITE,
@@ -203,7 +212,7 @@ mod win {
     }
 
     /// Retry a failed write later without blocking the Windows message loop.
-    fn retry_pending_write(hwnd: HWND, text: String) {
+    fn retry_pending_write(hwnd: HWND, pending: PendingWrite) {
         let hwnd = SendHwnd::new(hwnd);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -215,7 +224,7 @@ mod win {
             if guard.is_some() {
                 return;
             }
-            *guard = Some(text);
+            *guard = Some(pending);
             if !hwnd.post_message(WM_DO_WRITE, 0, 0) {
                 *guard = None;
                 eprintln!("AutoFxEmbed: failed to reschedule clipboard write");
@@ -224,19 +233,25 @@ mod win {
     }
 
     /// Runs in the deferred WM_DO_WRITE handler, outside the update broadcast.
-    unsafe fn do_pending_write_win(hwnd: HWND) {
-        unsafe {
-            let to_write = PENDING_WRITE.lock().ok().and_then(|mut g| g.take());
-            if let Some(new_text) = to_write {
-                for _ in 0..3 {
-                    if clipboard::write_text(&new_text) {
-                        return;
+    fn do_pending_write_win(hwnd: HWND) {
+        let pending = PENDING_WRITE.lock().ok().and_then(|mut g| g.take());
+        if let Some(pending) = pending {
+            for _ in 0..3 {
+                match clipboard::read_text() {
+                    Some(current) if current == pending.source => {}
+                    Some(_) => return,
+                    None => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                        continue;
                     }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
                 }
-                eprintln!("AutoFxEmbed: clipboard write busy; retrying later");
-                retry_pending_write(hwnd, new_text);
+                if clipboard::write_text(&pending.replacement) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
+            eprintln!("AutoFxEmbed: clipboard write busy; retrying later");
+            retry_pending_write(hwnd, pending);
         }
     }
 }
@@ -250,8 +265,9 @@ mod linux_impl {
     use super::*;
     use std::{
         sync::{
-            atomic::Ordering,
-            mpsc::{self, Receiver, RecvTimeoutError},
+            atomic::{AtomicBool, Ordering},
+            mpsc::{self, Receiver, RecvTimeoutError, Sender},
+            Arc,
         },
         thread,
         time::{Duration, Instant},
@@ -272,6 +288,7 @@ mod linux_impl {
     const FALLBACK_POLL: Duration = Duration::from_millis(30);
     const X11_SAFETY_POLL: Duration = Duration::from_secs(5);
     const QUIT_CHECK: Duration = Duration::from_millis(100);
+    const MAX_PRIMARY_BYTES: usize = 1024 * 1024;
 
     struct X11Watcher {
         changes: Receiver<()>,
@@ -401,29 +418,80 @@ mod linux_impl {
         })
     }
 
-    /// Read the PRIMARY selection (mouse selection / middle-click paste).
-    /// Some apps publish copies only here; if Wayland is unavailable (pure X11
-    /// session) this simply returns None and clipboard-only behavior stays.
-    fn primary_text() -> Option<String> {
+    struct PrimaryReader {
+        results: Receiver<Option<String>>,
+        sender: Sender<Option<String>>,
+        active: Arc<AtomicBool>,
+    }
+
+    impl PrimaryReader {
+        fn new() -> Self {
+            let (sender, results) = mpsc::channel();
+            Self {
+                results,
+                sender,
+                active: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
+        fn request(&self) {
+            if self
+                .active
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
+                .is_err()
+            {
+                return;
+            }
+            let sender = self.sender.clone();
+            let active = Arc::clone(&self.active);
+            thread::spawn(move || {
+                let result = read_primary_text();
+                let _ = sender.send(result);
+                active.store(false, Ordering::Release);
+            });
+        }
+
+        fn take(&self) -> Option<String> {
+            self.results.try_recv().ok().flatten()
+        }
+    }
+
+    /// Read PRIMARY away from the event loop: a broken owner can block its worker,
+    /// but cannot freeze the tray or spawn more than one blocked read.
+    fn read_primary_text() -> Option<String> {
         use std::io::Read;
         use wl_clipboard_rs::paste::{get_contents, ClipboardType, MimeType, Seat};
-        let mut pipe = get_contents(ClipboardType::Primary, Seat::Unspecified, MimeType::Text)
+        let pipe = get_contents(ClipboardType::Primary, Seat::Unspecified, MimeType::Text)
             .ok()?
             .0;
         let mut buf = Vec::new();
-        pipe.read_to_end(&mut buf).ok()?;
+        pipe.take((MAX_PRIMARY_BYTES + 1) as u64)
+            .read_to_end(&mut buf)
+            .ok()?;
+        if buf.len() > MAX_PRIMARY_BYTES {
+            eprintln!("AutoFxEmbed: primary selection is too large");
+            return None;
+        }
         Some(String::from_utf8_lossy(&buf).into_owned())
     }
 
     /// Write the PRIMARY selection (best effort — Wayland only).
-    fn set_primary(text: &str) {
+    fn set_primary(text: &str) -> bool {
         use wl_clipboard_rs::copy::{ClipboardType, MimeType, Options, Source};
         let source = Source::Bytes(text.as_bytes().to_vec().into_boxed_slice());
         let mut opts = Options::new();
         opts.clipboard(ClipboardType::Primary);
-        if let Err(e) = opts.copy(source, MimeType::Text) {
-            eprintln!("AutoFxEmbed: primary write failed: {e}");
+        match opts.copy(source, MimeType::Text) {
+            Ok(()) => true,
+            Err(error) => {
+                eprintln!("AutoFxEmbed: primary write failed: {error}");
+                false
+            }
         }
+    }
+
+    fn preview(text: &str) -> String {
+        text.chars().take(80).collect()
     }
 
     pub fn run() {
@@ -453,6 +521,9 @@ mod linux_impl {
         let mut last_primary = String::new();
         let mut failed_text: Option<String> = None;
         let mut retry_at = Instant::now();
+        let mut failed_primary: Option<String> = None;
+        let mut primary_retry_at = Instant::now();
+        let primary_reader = PrimaryReader::new();
         let mut was_empty = false;
         let mut x11_watcher = start_x11_watcher();
         let mut next_safety_poll = Instant::now();
@@ -512,8 +583,7 @@ mod linux_impl {
                     Ok(text) => {
                         if text != last_text {
                             was_empty = false;
-                            let preview: String = text.chars().take(80).collect();
-                            eprintln!("AutoFxEmbed: read -> {:?}", preview);
+                            eprintln!("AutoFxEmbed: read -> {:?}", preview(&text));
                         }
                         if text != last_text
                             && (failed_text.as_deref() != Some(text.as_str())
@@ -522,12 +592,15 @@ mod linux_impl {
                             if let Some(new_text) = transform_text(&text) {
                                 eprintln!(
                                     "AutoFxEmbed: {} -> {}",
-                                    &text[..text.len().min(80)],
-                                    &new_text[..new_text.len().min(80)]
+                                    preview(&text),
+                                    preview(&new_text)
                                 );
                                 match clipboard.set_text(&new_text) {
                                     Ok(()) => {
-                                        set_primary(&new_text);
+                                        if set_primary(&new_text) {
+                                            last_primary = new_text.clone();
+                                            failed_primary = None;
+                                        }
                                         last_text = new_text;
                                         failed_text = None;
                                     }
@@ -550,27 +623,44 @@ mod linux_impl {
                         }
                     }
                 }
+            }
 
-                // PRIMARY selection (mouse selection / middle-click paste) — some
-                // apps (notably Chromium-family browsers like Helium) publish copies
-                // there instead of the CLIPBOARD selection.
-                if let Some(text) = primary_text() {
-                    if text != last_primary && text != last_text {
-                        if let Some(new_text) = transform_text(&text) {
-                            eprintln!(
-                                "AutoFxEmbed: primary {} -> {}",
-                                &text[..text.len().min(80)],
-                                &new_text[..new_text.len().min(80)]
-                            );
-                            let _ = clipboard.set_text(&new_text);
-                            set_primary(&new_text);
-                            last_primary = new_text.clone();
-                            last_text = new_text;
-                        } else {
-                            last_primary = text;
+            // PRIMARY selection (mouse selection / middle-click paste) — some apps
+            // publish copies only there. Reads happen on a bounded worker so a
+            // broken selection owner cannot block this event loop.
+            if let Some(text) = primary_reader.take() {
+                let can_retry = failed_primary.as_deref() != Some(text.as_str())
+                    || Instant::now() >= primary_retry_at;
+                if text != last_primary && text != last_text && can_retry {
+                    if let Some(new_text) = transform_text(&text) {
+                        eprintln!(
+                            "AutoFxEmbed: primary {} -> {}",
+                            preview(&text),
+                            preview(&new_text)
+                        );
+                        match clipboard.set_text(&new_text) {
+                            Ok(()) => last_text = new_text.clone(),
+                            Err(error) => {
+                                eprintln!("AutoFxEmbed: clipboard write failed: {error}");
+                            }
                         }
+                        if set_primary(&new_text) {
+                            last_primary = new_text;
+                            failed_primary = None;
+                        } else {
+                            failed_primary = Some(text);
+                            primary_retry_at = Instant::now() + Duration::from_secs(1);
+                        }
+                    } else {
+                        last_primary = text;
+                        failed_primary = None;
                     }
                 }
+            }
+
+            let primary_retry_due = failed_primary.is_none() || Instant::now() >= primary_retry_at;
+            if (process_clipboard || failed_primary.is_some()) && primary_retry_due {
+                primary_reader.request();
             }
         }
 
@@ -591,8 +681,15 @@ mod linux_impl {
 /// "sometimes transforms, sometimes not" behavior.
 /// The OS file lock auto-releases when the process dies, so no stale locks.
 fn lock_single_instance() -> Option<std::fs::File> {
-    let path = std::env::temp_dir().join("autofxembed.lock");
-    let file = std::fs::File::create(&path).ok()?;
+    let dir =
+        dirs::runtime_dir().or_else(|| dirs::config_dir().map(|path| path.join("autofxembed")))?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(dir.join("autofxembed.lock"))
+        .ok()?;
     match file.try_lock() {
         Ok(()) => Some(file),
         Err(_) => None,

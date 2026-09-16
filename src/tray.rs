@@ -24,10 +24,10 @@ use windows_sys::Win32::UI::Shell::{
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW, PostMessageW,
     SetForegroundWindow, TrackPopupMenu, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION,
     MB_OK, MF_CHECKED, MF_DEFAULT, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_RBUTTONUP,
+    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_NULL, WM_RBUTTONUP,
 };
 
 /// Custom message Windows sends to our window when the tray icon is interacted with.
@@ -117,8 +117,16 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         DestroyMenu(menu);
         return;
     }
-    let fixup_checked = if crate::config::is_boypussyx() { 0 } else { MF_CHECKED };
-    let boy_checked = if crate::config::is_boypussyx() { MF_CHECKED } else { 0 };
+    let fixup_checked = if crate::config::is_boypussyx() {
+        0
+    } else {
+        MF_CHECKED
+    };
+    let boy_checked = if crate::config::is_boypussyx() {
+        MF_CHECKED
+    } else {
+        0
+    };
     if AppendMenuW(
         x_submenu,
         MF_STRING | fixup_checked,
@@ -159,7 +167,6 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         DestroyMenu(menu);
         return;
     }
-
 
     // Start on startup (checkable — check reflects current registry state).
     let startup_flags = MF_STRING
@@ -219,6 +226,9 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         hwnd,
         std::ptr::null(),
     );
+    if PostMessageW(hwnd, WM_NULL, 0, 0) == 0 {
+        eprintln!("AutoFxEmbed: failed to finalize tray menu");
+    }
     DestroyMenu(menu);
 
     match cmd as u32 {

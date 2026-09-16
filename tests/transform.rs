@@ -49,6 +49,14 @@ fn transforms_http_scheme() {
 }
 
 #[test]
+fn transforms_case_insensitive_scheme_and_host() {
+    assert_eq!(
+        transform_clipboard("HTTPS://TWITTER.COM/foo"),
+        Some("HTTPS://fxtwitter.com/foo".to_string())
+    );
+}
+
+#[test]
 fn transforms_no_scheme() {
     assert_eq!(
         transform_clipboard("twitter.com/foo"),
