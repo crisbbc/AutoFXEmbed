@@ -24,10 +24,17 @@ fn rules() -> &'static [(&'static str, &'static str)] {
 
 /// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
 fn host_matches(host: &str, domain: &str) -> bool {
-    host == domain
-        || host
-            .strip_suffix(domain)
-            .is_some_and(|prefix| prefix.ends_with('.'))
+    if host.eq_ignore_ascii_case(domain) {
+        return true;
+    }
+    let Some(suffix_start) = host.len().checked_sub(domain.len()) else {
+        return false;
+    };
+    suffix_start > 0
+        && host.as_bytes().get(suffix_start - 1) == Some(&b'.')
+        && host
+            .get(suffix_start..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(domain))
 }
 
 /// Return the byte range of the hostname within a URL authority.
@@ -59,13 +66,20 @@ pub(crate) fn transform_clipboard_with(text: &str, rules: &[(&str, &str)]) -> Op
     }
 
     // Split off the scheme (preserve it for the output).
-    let (scheme, after_scheme) = if let Some(rest) = trimmed.strip_prefix("https://") {
-        ("https://", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        ("http://", rest)
+    let scheme_len = if trimmed
+        .get(..8)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+    {
+        8
+    } else if trimmed
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+    {
+        7
     } else {
-        ("", trimmed)
+        0
     };
+    let (scheme, after_scheme) = trimmed.split_at(scheme_len);
 
     // Only rewrite clean single URLs (no internal whitespace of any kind —
     // spaces, tabs, newlines, …). Anything with internal whitespace is left
@@ -97,7 +111,6 @@ pub(crate) fn transform_clipboard_with(text: &str, rules: &[(&str, &str)]) -> Op
     }
     None
 }
-
 
 /// If `text` is a single supported URL, OR contains one or more supported URLs
 /// embedded in surrounding text, return `text` with every such URL rewritten to

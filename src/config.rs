@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static USE_BOY: AtomicBool = AtomicBool::new(false);
 
-
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("autofxembed").join("x_target"))
 }
@@ -18,7 +17,10 @@ pub fn is_boypussyx() -> bool {
 
 pub fn set_boypussyx(value: bool) {
     USE_BOY.store(value, Ordering::Relaxed);
-    eprintln!("AutoFxEmbed: X target -> {}", if value { "boypussyx" } else { "fixup" });
+    eprintln!(
+        "AutoFxEmbed: X target -> {}",
+        if value { "boypussyx" } else { "fixup" }
+    );
     let _ = save(value);
 }
 

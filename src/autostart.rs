@@ -54,9 +54,9 @@ pub fn toggle() -> bool {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
+use std::os::windows::ffi::OsStrExt;
 #[cfg(target_os = "windows")]
-use windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW;
+use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::Registry::{
     RegCloseKey, RegDeleteValueW, RegOpenKeyExW, RegQueryValueExW, RegSetValueExW, HKEY,
@@ -99,18 +99,14 @@ unsafe fn is_enabled_windows() -> bool {
 
 /// Return the current exe path wrapped in double quotes, null-terminated UTF-16.
 /// The quoting lets paths with spaces survive the Run key's command-line parsing.
-///
-/// # Safety
-/// Calls GetModuleFileNameW.
 #[cfg(target_os = "windows")]
-unsafe fn quoted_exe_path() -> Vec<u16> {
-    let mut buf = [0u16; 1024];
-    let len = GetModuleFileNameW(std::ptr::null_mut(), buf.as_mut_ptr(), buf.len() as u32);
-    if len == 0 {
-        return wide("");
-    }
-    let path = String::from_utf16_lossy(&buf[..len as usize]);
-    wide(&format!("\"{}\"", path))
+fn quoted_exe_path() -> Option<Vec<u16>> {
+    let path = std::env::current_exe().ok()?;
+    let mut quoted = Vec::with_capacity(path.as_os_str().len() + 3);
+    quoted.push('"' as u16);
+    quoted.extend(path.as_os_str().encode_wide());
+    quoted.extend(['"' as u16, 0]);
+    Some(quoted)
 }
 
 /// Enable auto-start by writing the Run value. Returns `true` on success.
@@ -126,7 +122,10 @@ unsafe fn enable_windows() -> bool {
     {
         return false;
     }
-    let data = quoted_exe_path();
+    let Some(data) = quoted_exe_path() else {
+        RegCloseKey(hkey);
+        return false;
+    };
     let cb = (data.len() * 2) as u32; // bytes, including the trailing null
     let rc = RegSetValueExW(
         hkey,
