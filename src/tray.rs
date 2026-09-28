@@ -46,6 +46,8 @@ const MENU_ABOUT: u32 = 3;
 const MENU_FIXUP: u32 = 4;
 #[cfg(target_os = "windows")]
 const MENU_BOY: u32 = 5;
+#[cfg(target_os = "windows")]
+const MENU_MPREG: u32 = 6;
 
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
@@ -117,16 +119,11 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         DestroyMenu(menu);
         return;
     }
-    let fixup_checked = if crate::config::is_boypussyx() {
-        0
-    } else {
-        MF_CHECKED
-    };
-    let boy_checked = if crate::config::is_boypussyx() {
-        MF_CHECKED
-    } else {
-        0
-    };
+    let x_target = crate::config::x_target();
+    let checked_if = |target| if x_target == target { MF_CHECKED } else { 0 };
+    let fixup_checked = checked_if(crate::config::XTarget::FixUp);
+    let boy_checked = checked_if(crate::config::XTarget::BoyPussyX);
+    let mpreg_checked = checked_if(crate::config::XTarget::MpregX);
     if AppendMenuW(
         x_submenu,
         MF_STRING | fixup_checked,
@@ -139,6 +136,12 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
             MENU_BOY as usize,
             crate::clipboard::wide("BoyPussyX (boypussyx.com)").as_ptr(),
         ) == 0
+        || AppendMenuW(
+            x_submenu,
+            MF_STRING | mpreg_checked,
+            MENU_MPREG as usize,
+            crate::clipboard::wide("MpregX (mpregx.com)").as_ptr(),
+        ) == 0
     {
         DestroyMenu(x_submenu);
         DestroyMenu(menu);
@@ -148,14 +151,21 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         menu,
         MF_STRING | MF_POPUP,
         x_submenu as usize,
-        crate::clipboard::wide("X / Twitter \u{25B6}").as_ptr(),
+        crate::clipboard::wide("X / Twitter").as_ptr(),
     ) == 0
-        || AppendMenuW(
-            menu,
-            MF_STRING | MF_GRAYED | MF_DISABLED,
-            0,
-            crate::clipboard::wide("Instagram (instagram7.com)").as_ptr(),
-        ) == 0
+    {
+        // The submenu was never attached, so `DestroyMenu(menu)` won't free it.
+        DestroyMenu(x_submenu);
+        DestroyMenu(menu);
+        return;
+    }
+    // From here on `menu` owns `x_submenu` and frees it on destroy.
+    if AppendMenuW(
+        menu,
+        MF_STRING | MF_GRAYED | MF_DISABLED,
+        0,
+        crate::clipboard::wide("Instagram (instagram7.com)").as_ptr(),
+    ) == 0
         || AppendMenuW(
             menu,
             MF_STRING | MF_GRAYED | MF_DISABLED,
@@ -232,8 +242,9 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     DestroyMenu(menu);
 
     match cmd as u32 {
-        MENU_FIXUP => crate::config::set_boypussyx(false),
-        MENU_BOY => crate::config::set_boypussyx(true),
+        MENU_FIXUP => crate::config::set_x_target(crate::config::XTarget::FixUp),
+        MENU_BOY => crate::config::set_x_target(crate::config::XTarget::BoyPussyX),
+        MENU_MPREG => crate::config::set_x_target(crate::config::XTarget::MpregX),
         MENU_STARTUP => {
             crate::autostart::toggle();
         }
@@ -313,35 +324,28 @@ impl KsniTray for LinuxTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
-        let is_boy = crate::config::is_boypussyx();
+        let x_target = crate::config::x_target();
+        let x_item = |target: crate::config::XTarget, name: &str| -> MenuItem<Self> {
+            let mark = if x_target == target { "✓" } else { " " };
+            StandardItem {
+                label: format!("{mark} {name}"),
+                activate: Box::new(move |_tray| {
+                    crate::config::set_x_target(target);
+                }),
+                ..Default::default()
+            }
+            .into()
+        };
         vec![
             SubMenu {
                 label: "X / Twitter".into(),
                 submenu: vec![
-                    StandardItem {
-                        label: if !is_boy {
-                            "✓ FixUpX (fxtwitter / fixupx)".into()
-                        } else {
-                            "  FixUpX (fxtwitter / fixupx)".into()
-                        },
-                        activate: Box::new(|_tray| {
-                            crate::config::set_boypussyx(false);
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
-                    StandardItem {
-                        label: if is_boy {
-                            "✓ BoyPussyX (boypussyx.com)".into()
-                        } else {
-                            "  BoyPussyX (boypussyx.com)".into()
-                        },
-                        activate: Box::new(|_tray| {
-                            crate::config::set_boypussyx(true);
-                        }),
-                        ..Default::default()
-                    }
-                    .into(),
+                    x_item(crate::config::XTarget::FixUp, "FixUpX (fxtwitter / fixupx)"),
+                    x_item(
+                        crate::config::XTarget::BoyPussyX,
+                        "BoyPussyX (boypussyx.com)",
+                    ),
+                    x_item(crate::config::XTarget::MpregX, "MpregX (mpregx.com)"),
                 ],
                 ..Default::default()
             }
@@ -372,8 +376,9 @@ impl KsniTray for LinuxTray {
             StandardItem {
                 label: "About".into(),
                 activate: Box::new(|_tray| {
-                    // Best-effort desktop notification (ignore failures).
-                    if let Err(error) = std::process::Command::new("notify-send")
+                    // Best-effort desktop notification (ignore failures). The child
+                    // is reaped on a helper thread so it never lingers as a zombie.
+                    match std::process::Command::new("notify-send")
                         .args([
                             "--app-name=AutoFxEmbed",
                             "About AutoFxEmbed",
@@ -381,7 +386,14 @@ impl KsniTray for LinuxTray {
                         ])
                         .spawn()
                     {
-                        eprintln!("AutoFxEmbed: unable to show About notification: {error}");
+                        Ok(mut child) => {
+                            std::thread::spawn(move || {
+                                let _ = child.wait();
+                            });
+                        }
+                        Err(error) => {
+                            eprintln!("AutoFxEmbed: unable to show About notification: {error}");
+                        }
                     }
                 }),
                 ..Default::default()

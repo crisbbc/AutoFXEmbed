@@ -418,37 +418,48 @@ mod linux_impl {
         })
     }
 
+    /// Long-lived worker that reads PRIMARY on request. A broken selection owner
+    /// can block the worker, but never the event loop, and pending requests
+    /// coalesce into one so at most one read is ever outstanding.
     struct PrimaryReader {
         results: Receiver<Option<String>>,
-        sender: Sender<Option<String>>,
-        active: Arc<AtomicBool>,
+        requests: Sender<()>,
+        pending: Arc<AtomicBool>,
     }
 
     impl PrimaryReader {
         fn new() -> Self {
-            let (sender, results) = mpsc::channel();
+            let (result_tx, results) = mpsc::channel();
+            let (requests, request_rx) = mpsc::channel::<()>();
+            let pending = Arc::new(AtomicBool::new(false));
+            let worker_pending = Arc::clone(&pending);
+            thread::spawn(move || {
+                while request_rx.recv().is_ok() {
+                    let result = read_primary_text();
+                    // Clear before publishing so a new request is accepted as
+                    // soon as the caller can observe this result.
+                    worker_pending.store(false, Ordering::Release);
+                    if result_tx.send(result).is_err() {
+                        break;
+                    }
+                }
+            });
             Self {
                 results,
-                sender,
-                active: Arc::new(AtomicBool::new(false)),
+                requests,
+                pending,
             }
         }
 
         fn request(&self) {
             if self
-                .active
+                .pending
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-                .is_err()
+                .is_ok()
+                && self.requests.send(()).is_err()
             {
-                return;
+                self.pending.store(false, Ordering::Release);
             }
-            let sender = self.sender.clone();
-            let active = Arc::clone(&self.active);
-            thread::spawn(move || {
-                let result = read_primary_text();
-                let _ = sender.send(result);
-                active.store(false, Ordering::Release);
-            });
         }
 
         fn take(&self) -> Option<String> {
@@ -523,7 +534,10 @@ mod linux_impl {
         let mut retry_at = Instant::now();
         let mut failed_primary: Option<String> = None;
         let mut primary_retry_at = Instant::now();
-        let primary_reader = PrimaryReader::new();
+        // PRIMARY access goes through wl-clipboard-rs, which only works on Wayland.
+        let primary_reader = std::env::var_os("WAYLAND_DISPLAY")
+            .is_some()
+            .then(PrimaryReader::new);
         let mut was_empty = false;
         let mut x11_watcher = start_x11_watcher();
         let mut next_safety_poll = Instant::now();
@@ -597,7 +611,7 @@ mod linux_impl {
                                 );
                                 match clipboard.set_text(&new_text) {
                                     Ok(()) => {
-                                        if set_primary(&new_text) {
+                                        if primary_reader.is_some() && set_primary(&new_text) {
                                             last_primary = new_text.clone();
                                             failed_primary = None;
                                         }
@@ -628,7 +642,7 @@ mod linux_impl {
             // PRIMARY selection (mouse selection / middle-click paste) — some apps
             // publish copies only there. Reads happen on a bounded worker so a
             // broken selection owner cannot block this event loop.
-            if let Some(text) = primary_reader.take() {
+            if let Some(text) = primary_reader.as_ref().and_then(PrimaryReader::take) {
                 let can_retry = failed_primary.as_deref() != Some(text.as_str())
                     || Instant::now() >= primary_retry_at;
                 if text != last_primary && text != last_text && can_retry {
@@ -638,12 +652,7 @@ mod linux_impl {
                             preview(&text),
                             preview(&new_text)
                         );
-                        match clipboard.set_text(&new_text) {
-                            Ok(()) => last_text = new_text.clone(),
-                            Err(error) => {
-                                eprintln!("AutoFxEmbed: clipboard write failed: {error}");
-                            }
-                        }
+                        // Only PRIMARY is rewritten; the Ctrl+C clipboard is left alone.
                         if set_primary(&new_text) {
                             last_primary = new_text;
                             failed_primary = None;
@@ -659,8 +668,10 @@ mod linux_impl {
             }
 
             let primary_retry_due = failed_primary.is_none() || Instant::now() >= primary_retry_at;
-            if (process_clipboard || failed_primary.is_some()) && primary_retry_due {
-                primary_reader.request();
+            if let Some(reader) = &primary_reader {
+                if (process_clipboard || failed_primary.is_some()) && primary_retry_due {
+                    reader.request();
+                }
             }
         }
 
@@ -680,26 +691,52 @@ mod linux_impl {
 /// Keep a single instance: two instances racing on clipboard rewrites produce
 /// "sometimes transforms, sometimes not" behavior.
 /// The OS file lock auto-releases when the process dies, so no stale locks.
-fn lock_single_instance() -> Option<std::fs::File> {
-    let dir =
-        dirs::runtime_dir().or_else(|| dirs::config_dir().map(|path| path.join("autofxembed")))?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .open(dir.join("autofxembed.lock"))
-        .ok()?;
+enum LockOutcome {
+    Held(std::fs::File),
+    AlreadyRunning,
+    Unavailable,
+}
+
+fn lock_single_instance() -> LockOutcome {
+    let Some(dir) =
+        dirs::runtime_dir().or_else(|| dirs::config_dir().map(|path| path.join("autofxembed")))
+    else {
+        eprintln!("AutoFxEmbed: no runtime/config dir; single-instance lock disabled");
+        return LockOutcome::Unavailable;
+    };
+    let file = std::fs::create_dir_all(&dir).and_then(|()| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(dir.join("autofxembed.lock"))
+    });
+    let file = match file {
+        Ok(file) => file,
+        Err(error) => {
+            eprintln!("AutoFxEmbed: unable to open lock file ({error}); continuing without it");
+            return LockOutcome::Unavailable;
+        }
+    };
     match file.try_lock() {
-        Ok(()) => Some(file),
-        Err(_) => None,
+        Ok(()) => LockOutcome::Held(file),
+        Err(std::fs::TryLockError::WouldBlock) => LockOutcome::AlreadyRunning,
+        Err(std::fs::TryLockError::Error(error)) => {
+            eprintln!("AutoFxEmbed: unable to lock ({error}); continuing without it");
+            LockOutcome::Unavailable
+        }
     }
 }
 /// Start the clipboard monitor + tray icon.  Blocks until the user quits.
 pub fn run() {
-    let Some(_single_instance) = lock_single_instance() else {
-        eprintln!("AutoFxEmbed: another instance is already running; exiting");
-        return;
+    let _single_instance = match lock_single_instance() {
+        LockOutcome::Held(file) => Some(file),
+        LockOutcome::AlreadyRunning => {
+            eprintln!("AutoFxEmbed: another instance is already running; exiting");
+            return;
+        }
+        LockOutcome::Unavailable => None,
     };
     crate::config::load();
     #[cfg(target_os = "windows")]

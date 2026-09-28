@@ -192,20 +192,26 @@ fn is_enabled_linux() -> bool {
 }
 
 #[cfg(target_os = "linux")]
-fn exe_path() -> String {
+fn exe_path() -> Option<String> {
     std::env::current_exe()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| String::new())
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
+/// Quote a path for `Exec=`. The spec escapes `"`, `` ` ``, `$` and `\` with a
+/// backslash inside quotes, and the key's string value then doubles every
+/// backslash again, so each of those characters gets two backslashes.
 #[cfg(target_os = "linux")]
 fn desktop_exec_arg(path: &str) -> String {
     let mut quoted = String::with_capacity(path.len() + 2);
     quoted.push('"');
     for character in path.chars() {
         match character {
-            '\\' => quoted.push_str("\\\\"),
-            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\\\\\"),
+            '"' | '`' | '$' => {
+                quoted.push_str("\\\\");
+                quoted.push(character);
+            }
             '%' => quoted.push_str("%%"),
             _ => quoted.push(character),
         }
@@ -215,8 +221,9 @@ fn desktop_exec_arg(path: &str) -> String {
 }
 
 #[cfg(target_os = "linux")]
-fn desktop_file_content() -> String {
-    format!(
+fn desktop_file_content() -> Option<String> {
+    let exe = desktop_exec_arg(&exe_path()?);
+    Some(format!(
         "\
 [Desktop Entry]
 Type=Application
@@ -226,8 +233,7 @@ Exec={exe}
 Terminal=false
 X-GNOME-Autostart-enabled=true
 ",
-        exe = desktop_exec_arg(&exe_path())
-    )
+    ))
 }
 
 #[cfg(all(test, target_os = "linux"))]
@@ -238,8 +244,9 @@ mod tests {
     fn quotes_and_escapes_desktop_exec_paths() {
         assert_eq!(
             desktop_exec_arg("/home/user/My Apps/auto\\fx\"embed"),
-            "\"/home/user/My Apps/auto\\\\fx\\\"embed\""
+            "\"/home/user/My Apps/auto\\\\\\\\fx\\\\\"embed\""
         );
+        assert_eq!(desktop_exec_arg("/a/$b`c%d"), "\"/a/\\\\$b\\\\`c%%d\"");
     }
 }
 
@@ -250,7 +257,13 @@ fn enable_linux() -> bool {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            std::fs::write(&path, desktop_file_content()).is_ok()
+            match desktop_file_content() {
+                Some(content) => std::fs::write(&path, content).is_ok(),
+                None => {
+                    eprintln!("AutoFxEmbed: unable to resolve executable path for autostart");
+                    false
+                }
+            }
         }
         None => false,
     }

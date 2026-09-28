@@ -18,6 +18,9 @@ When the clipboard contains one or more links to one of these services:
 | `instagram.com` | `instagram7.com` |
 | `tiktok.com`    | `tnktok.com`     |
 
+X / Twitter links can instead go to `boypussyx.com` or `mpregx.com`; pick the
+target from the tray icon's **X / Twitter** submenu (the choice is remembered).
+
 …everything else in the URL (subdomain, optional port, path, query, fragment) is
 preserved and the clipboard is updated in place. Already-transformed links,
 non-matching URLs are left untouched; supported links embedded in prose are

@@ -174,3 +174,9 @@ fn skips_url_with_internal_newline() {
         None
     );
 }
+
+#[test]
+fn skips_email_addresses() {
+    assert_eq!(transform_clipboard("press@twitter.com"), None);
+    assert_eq!(transform_clipboard("mailto:press@x.com"), None);
+}

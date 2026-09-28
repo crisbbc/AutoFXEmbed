@@ -1,24 +1,27 @@
-/// (original host, embed-friendly host) rewrite rules, in priority order.
-pub(crate) const FIXUP_RULES: &[(&str, &str)] = &[
-    ("twitter.com", "fxtwitter.com"),
-    ("x.com", "fixupx.com"),
-    ("bsky.app", "fxbsky.app"),
-    ("instagram.com", "instagram7.com"),
-    ("tiktok.com", "tnktok.com"),
-];
-pub(crate) const BOY_RULES: &[(&str, &str)] = &[
-    ("twitter.com", "boypussyx.com"),
-    ("x.com", "boypussyx.com"),
+/// Rewrites shared by every X/Twitter target.
+const COMMON_RULES: &[(&str, &str)] = &[
     ("bsky.app", "fxbsky.app"),
     ("instagram.com", "instagram7.com"),
     ("tiktok.com", "tnktok.com"),
 ];
 
+/// X/Twitter (original host, embed-friendly host) rules per target.
+pub(crate) const FIXUP_RULES: &[(&str, &str)] =
+    &[("twitter.com", "fxtwitter.com"), ("x.com", "fixupx.com")];
+pub(crate) const BOY_RULES: &[(&str, &str)] =
+    &[("twitter.com", "boypussyx.com"), ("x.com", "boypussyx.com")];
+pub(crate) const MPREG_RULES: &[(&str, &str)] =
+    &[("twitter.com", "mpregx.com"), ("x.com", "mpregx.com")];
+
 fn rules() -> &'static [(&'static str, &'static str)] {
-    if crate::config::is_boypussyx() {
-        BOY_RULES
-    } else {
-        FIXUP_RULES
+    rules_for(crate::config::x_target())
+}
+
+fn rules_for(target: crate::config::XTarget) -> &'static [(&'static str, &'static str)] {
+    match target {
+        crate::config::XTarget::FixUp => FIXUP_RULES,
+        crate::config::XTarget::BoyPussyX => BOY_RULES,
+        crate::config::XTarget::MpregX => MPREG_RULES,
     }
 }
 
@@ -58,8 +61,9 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
     transform_clipboard_with(text, rules())
 }
 
-/// Same as [`transform_clipboard`] but with an explicit rule set (for tests).
-pub(crate) fn transform_clipboard_with(text: &str, rules: &[(&str, &str)]) -> Option<String> {
+/// Same as [`transform_clipboard`] but with an explicit X/Twitter rule set (for
+/// tests); the shared Bluesky/Instagram/TikTok rules always apply.
+pub(crate) fn transform_clipboard_with(text: &str, x_rules: &[(&str, &str)]) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -93,10 +97,14 @@ pub(crate) fn transform_clipboard_with(text: &str, rules: &[(&str, &str)]) -> Op
         .find(['/', '?', '#'])
         .unwrap_or(after_scheme.len());
     let authority = &after_scheme[..authority_end];
+    // Without a scheme, `@` means an email address (or `mailto:`), not user-info.
+    if scheme_len == 0 && authority.contains('@') {
+        return None;
+    }
     let (host_start, host_end) = authority_host_range(authority)?;
     let host = &authority[host_start..host_end];
 
-    for &(domain, replacement) in rules {
+    for &(domain, replacement) in x_rules.iter().chain(COMMON_RULES) {
         if host_matches(host, domain) {
             let domain_start = host_end - domain.len();
             let mut result =
@@ -164,4 +172,55 @@ fn transform_embedded(text: &str) -> Option<String> {
         rest = &rest[end..];
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mpregx_rules_rewrite_x_and_twitter() {
+        assert_eq!(
+            transform_clipboard_with("https://x.com/user/status/1", MPREG_RULES),
+            Some("https://mpregx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://mobile.twitter.com/user/status/1", MPREG_RULES),
+            Some("https://mobile.mpregx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://mpregx.com/user/status/1", MPREG_RULES),
+            None
+        );
+    }
+
+    #[test]
+    fn every_target_has_distinct_rules() {
+        use crate::config::XTarget;
+        assert_eq!(rules_for(XTarget::FixUp), FIXUP_RULES);
+        assert_eq!(rules_for(XTarget::BoyPussyX), BOY_RULES);
+        assert_eq!(rules_for(XTarget::MpregX), MPREG_RULES);
+    }
+
+    #[test]
+    fn common_rules_apply_to_every_target() {
+        for rules in [FIXUP_RULES, BOY_RULES, MPREG_RULES] {
+            assert_eq!(
+                transform_clipboard_with("https://www.tiktok.com/@a/video/1", rules),
+                Some("https://www.tnktok.com/@a/video/1".to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn email_addresses_are_not_rewritten() {
+        assert_eq!(
+            transform_clipboard_with("press@twitter.com", FIXUP_RULES),
+            None
+        );
+        assert_eq!(
+            transform_clipboard_with("mailto:press@x.com", FIXUP_RULES),
+            None
+        );
+    }
 }
