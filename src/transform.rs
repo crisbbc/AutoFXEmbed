@@ -121,18 +121,38 @@ pub(crate) fn transform_clipboard_with(text: &str, x_rules: &[(&str, &str)]) -> 
 /// Single-link inputs are trimmed and handled by [`transform_clipboard`]; prose
 /// with embedded links preserves all surrounding text verbatim.
 pub fn transform_text(text: &str) -> Option<String> {
+    transform_text_links(text).map(|(out, _)| out)
+}
+
+/// One link that was rewritten: the URL as copied and its embed-friendly form.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Rewrite {
+    pub original: String,
+    pub embed: String,
+}
+
+/// Like [`transform_text`], but also reports every link that was rewritten.
+pub fn transform_text_links(text: &str) -> Option<(String, Vec<Rewrite>)> {
     // Fast path: the whole input is one clean URL (trims surrounding ws).
     if let Some(out) = transform_clipboard(text) {
-        return Some(out);
+        let link = Rewrite {
+            original: text.trim().to_string(),
+            embed: out.clone(),
+        };
+        return Some((out, vec![link]));
     }
     transform_embedded(text)
 }
 
 /// Rewrite one whitespace-delimited token, tolerating wrapping punctuation such
 /// as `(url)`, `[text](url)`, `"url"`, `<url>` or a trailing `.` / `,`.
-fn transform_token(token: &str) -> Option<String> {
+fn transform_token(token: &str) -> Option<(String, Rewrite)> {
     if let Some(out) = transform_clipboard(token) {
-        return Some(out);
+        let link = Rewrite {
+            original: token.to_string(),
+            embed: out.clone(),
+        };
+        return Some((out, link));
     }
 
     // Prefix: everything before an explicit scheme, else leading opener chars.
@@ -168,7 +188,13 @@ fn transform_token(token: &str) -> Option<String> {
         return None;
     }
 
-    transform_clipboard(core).map(|rewritten| format!("{prefix}{rewritten}{suffix}"))
+    transform_clipboard(core).map(|rewritten| {
+        let link = Rewrite {
+            original: core.to_string(),
+            embed: rewritten.clone(),
+        };
+        (format!("{prefix}{rewritten}{suffix}"), link)
+    })
 }
 
 /// Scan `text` for URLs embedded in prose and rewrite each one in place.
@@ -176,7 +202,7 @@ fn transform_token(token: &str) -> Option<String> {
 /// verbatim; each non-whitespace token is offered to [`transform_clipboard`].
 /// Returns `None` when no token changed (so the clipboard is left alone and we
 /// avoid a re-write loop).
-fn transform_embedded(text: &str) -> Option<String> {
+fn transform_embedded(text: &str) -> Option<(String, Vec<Rewrite>)> {
     // Cheap dry run: most clipboard changes contain no supported URL, so
     // detect that up front and return without allocating in that common case.
     if !text
@@ -189,6 +215,7 @@ fn transform_embedded(text: &str) -> Option<String> {
     // Rebuild the text, rewriting each matching token and preserving all
     // surrounding whitespace verbatim.
     let mut out = String::with_capacity(text.len() + 8);
+    let mut links = Vec::new();
     let mut rest = text;
     while !rest.is_empty() {
         // Leading whitespace run: copy it verbatim.
@@ -201,12 +228,15 @@ fn transform_embedded(text: &str) -> Option<String> {
         // Next token: everything up to the next whitespace char (or end).
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
         match transform_token(&rest[..end]) {
-            Some(rewritten) => out.push_str(&rewritten),
+            Some((rewritten, link)) => {
+                out.push_str(&rewritten);
+                links.push(link);
+            }
             None => out.push_str(&rest[..end]),
         }
         rest = &rest[end..];
     }
-    Some(out)
+    Some((out, links))
 }
 
 #[cfg(test)]
@@ -227,6 +257,36 @@ mod tests {
             transform_clipboard_with("https://mpregx.com/user/status/1", MPREG_RULES),
             None
         );
+    }
+
+    #[test]
+    fn reports_each_rewritten_link() {
+        let (out, links) =
+            transform_text_links("a (https://x.com/u/status/1) b <https://bsky.app/p/2> c")
+                .unwrap();
+        assert_eq!(
+            out,
+            "a (https://fixupx.com/u/status/1) b <https://fxbsky.app/p/2> c"
+        );
+        assert_eq!(
+            links,
+            vec![
+                Rewrite {
+                    original: "https://x.com/u/status/1".into(),
+                    embed: "https://fixupx.com/u/status/1".into(),
+                },
+                Rewrite {
+                    original: "https://bsky.app/p/2".into(),
+                    embed: "https://fxbsky.app/p/2".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn single_link_is_reported_trimmed() {
+        let (_, links) = transform_text_links("  https://x.com/u/status/1\n").unwrap();
+        assert_eq!(links[0].original, "https://x.com/u/status/1");
     }
 
     #[test]

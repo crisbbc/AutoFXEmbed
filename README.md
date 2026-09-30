@@ -36,6 +36,16 @@ Change detection is event-driven wherever possible:
 
 A system-tray icon (the FxEmbed logo) provides a right-click menu (see below).
 
+## History
+
+Every converted link is remembered (the last 100; copying one again moves it to
+the top). Once a link is converted, the embed page is fetched once in the
+background to read its title and description, so the **Recent** submenu shows
+what each link is. The history is stored in
+`<config dir>/autofxembed/history.json` (`~/.config/autofxembed/` on Linux).
+That fetch is the only network request AutoFxEmbed makes; if it fails the entry
+is just shown by its URL.
+
 ## Install
 
 Install the latest version directly from this repository with Cargo:
@@ -76,6 +86,9 @@ Right-click the tray icon for:
 - **X / Twitter** — submenu to pick the target (FixUpX, BoyPussyX or MpregX);
   the choice is remembered.
 - **Instagram** / **TikTok** — informational (the host each is rewritten to).
+- **Recent** — the last 10 converted links, labeled with their title and
+  description; click one to copy its embed link again.
+- **Clear history** — forgets every stored link.
 - **Start on startup** — checked when AutoFxEmbed will launch at login. On
   Windows this toggles a value under
   `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates

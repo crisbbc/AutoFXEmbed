@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 #[cfg(target_os = "windows")]
 use crate::clipboard;
-use crate::transform::transform_text;
+use crate::transform::transform_text_links;
 
 /// Handoff between the clipboard-update handler and the deferred writer
 /// (Windows only — on Linux we write directly from the poll callback).
@@ -29,6 +29,7 @@ use crate::transform::transform_text;
 struct PendingWrite {
     source: String,
     replacement: String,
+    links: Vec<crate::transform::Rewrite>,
 }
 
 #[cfg(target_os = "windows")]
@@ -189,13 +190,14 @@ mod win {
                 eprintln!("AutoFxEmbed: unable to read clipboard text");
                 return;
             };
-            let Some(new_text) = transform_text(&text) else {
+            let Some((new_text, links)) = transform_text_links(&text) else {
                 return;
             };
             if let Ok(mut guard) = PENDING_WRITE.lock() {
                 *guard = Some(PendingWrite {
                     source: text,
                     replacement: new_text,
+                    links,
                 });
                 if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
                     hwnd,
@@ -248,6 +250,7 @@ mod win {
                     }
                 }
                 if clipboard::write_text(&pending.replacement) {
+                    crate::history::record(&pending.links);
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -539,8 +542,8 @@ mod linux_impl {
     }
 
     pub fn run() {
-        let (tray_handle, quit_flag) = match crate::tray::spawn() {
-            Ok((handle, quit)) => (handle, quit),
+        let (tray_handle, quit_flag, copy_request) = match crate::tray::spawn() {
+            Ok(control) => (control.handle, control.quit, control.copy_request),
             Err(error) => {
                 eprintln!("AutoFxEmbed: tray unavailable: {error:?}");
                 return;
@@ -580,6 +583,23 @@ mod linux_impl {
         loop {
             if quit_flag.load(Ordering::SeqCst) {
                 break;
+            }
+
+            // A link picked from the tray's Recent submenu: put it back on the
+            // clipboard (and PRIMARY) from here, where the clipboard lives.
+            let requested = copy_request.lock().ok().and_then(|mut r| r.take());
+            if let Some(link) = requested {
+                match clipboard.set_text(&link) {
+                    Ok(()) => {
+                        if primary_reader.is_some() && set_primary(&link) {
+                            last_primary = link.clone();
+                            failed_primary = None;
+                        }
+                        last_text = link;
+                        failed_text = None;
+                    }
+                    Err(error) => eprintln!("AutoFxEmbed: clipboard write failed: {error}"),
+                }
             }
 
             // (watcher gone, CLIPBOARD needs a read, PRIMARY needs a read, safety poll due)
@@ -662,10 +682,11 @@ mod linux_impl {
                             && (failed_text.as_deref() != Some(text.as_str())
                                 || Instant::now() >= retry_at)
                         {
-                            if let Some(new_text) = transform_text(&text) {
+                            if let Some((new_text, links)) = transform_text_links(&text) {
                                 eprintln!("AutoFxEmbed: rewrote link(s) in clipboard");
                                 match clipboard.set_text(&new_text) {
                                     Ok(()) => {
+                                        crate::history::record(&links);
                                         if primary_reader.is_some() && set_primary(&new_text) {
                                             last_primary = new_text.clone();
                                             failed_primary = None;
@@ -701,10 +722,11 @@ mod linux_impl {
                 let can_retry = failed_primary.as_deref() != Some(text.as_str())
                     || Instant::now() >= primary_retry_at;
                 if text != last_primary && text != last_text && can_retry {
-                    if let Some(new_text) = transform_text(&text) {
+                    if let Some((new_text, links)) = transform_text_links(&text) {
                         eprintln!("AutoFxEmbed: rewrote link(s) in primary selection");
                         // Only PRIMARY is rewritten; the Ctrl+C clipboard is left alone.
                         if set_primary(&new_text) {
+                            crate::history::record(&links);
                             last_primary = new_text;
                             failed_primary = None;
                         } else {
@@ -790,6 +812,7 @@ pub fn run() {
         LockOutcome::Unavailable => None,
     };
     crate::config::load();
+    crate::history::load();
     #[cfg(target_os = "windows")]
     win::run();
 

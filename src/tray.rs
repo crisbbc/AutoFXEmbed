@@ -43,6 +43,11 @@ const MENU_QUIT: u32 = 1;
 const MENU_STARTUP: u32 = 2;
 #[cfg(target_os = "windows")]
 const MENU_ABOUT: u32 = 3;
+#[cfg(target_os = "windows")]
+const MENU_CLEAR_HISTORY: u32 = 4;
+/// First ID of the Recent items (`MENU_RECENT_BASE + index in the snapshot`).
+#[cfg(target_os = "windows")]
+const MENU_RECENT_BASE: u32 = 200;
 /// First ID of the X / Twitter target items (`MENU_X_BASE + index in XTarget::ALL`).
 #[cfg(target_os = "windows")]
 const MENU_X_BASE: u32 = 100;
@@ -183,6 +188,31 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
+    // Recent conversions. The snapshot is kept so a returned ID maps to the
+    // entry that was shown, even if the history changes while the menu is open.
+    let recent = crate::history::recent(crate::history::MENU_ENTRIES);
+    let Some(recent_submenu) = Menu::popup() else {
+        return;
+    };
+    if recent.is_empty() {
+        if !recent_submenu.append(MF_STRING | MF_GRAYED | MF_DISABLED, 0, "(empty)") {
+            return;
+        }
+    }
+    for (index, entry) in recent.iter().enumerate() {
+        // `&` marks a mnemonic in Win32 menus; double it to show it literally.
+        let label = crate::history::menu_label(entry).replace('&', "&&");
+        if !recent_submenu.append(MF_STRING, (MENU_RECENT_BASE as usize) + index, &label) {
+            return;
+        }
+    }
+    if !menu.append_submenu(recent_submenu, "Recent")
+        || !menu.append(MF_STRING, MENU_CLEAR_HISTORY as usize, "Clear history")
+        || !menu.separator()
+    {
+        return;
+    }
+
     // Start on startup (checkable — check reflects current registry state).
     let startup_flags = MF_STRING
         | if crate::autostart::is_enabled() {
@@ -227,6 +257,15 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         c if (MENU_X_BASE..MENU_X_BASE + crate::config::XTarget::ALL.len() as u32).contains(&c) => {
             crate::config::set_x_target(crate::config::XTarget::ALL[(c - MENU_X_BASE) as usize]);
         }
+        c if (MENU_RECENT_BASE..MENU_RECENT_BASE + recent.len() as u32).contains(&c) => {
+            let entry = &recent[(c - MENU_RECENT_BASE) as usize];
+            if !crate::clipboard::write_text(&entry.embed) {
+                eprintln!("AutoFxEmbed: unable to copy history entry");
+            }
+        }
+        MENU_CLEAR_HISTORY => {
+            crate::history::clear();
+        }
         MENU_STARTUP => {
             crate::autostart::toggle();
         }
@@ -252,7 +291,7 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
 #[cfg(target_os = "linux")]
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 #[cfg(target_os = "linux")]
@@ -269,6 +308,9 @@ use ksni::{
 pub struct LinuxTray {
     /// Set to `true` from the Quit menu callback; the monitor loop reads it.
     pub quit_requested: Arc<AtomicBool>,
+    /// Link picked from the Recent submenu; the monitor loop owns the
+    /// clipboard (on Wayland it must stay alive to serve pastes) and copies it.
+    pub copy_request: Arc<Mutex<Option<String>>>,
 }
 
 #[cfg(target_os = "linux")]
@@ -306,6 +348,7 @@ impl KsniTray for LinuxTray {
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
+        let copy_request = self.copy_request.clone();
         let x_target = crate::config::x_target();
         let x_item = |target: crate::config::XTarget| -> MenuItem<Self> {
             let mark = if x_target == target { "✓" } else { " " };
@@ -337,6 +380,21 @@ impl KsniTray for LinuxTray {
             StandardItem {
                 label: "TikTok (tnktok.com)".into(),
                 enabled: false,
+                ..Default::default()
+            }
+            .into(),
+            MenuItem::Separator,
+            SubMenu {
+                label: "Recent".into(),
+                submenu: recent_items(copy_request),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Clear history".into(),
+                activate: Box::new(|_tray| {
+                    crate::history::clear();
+                }),
                 ..Default::default()
             }
             .into(),
@@ -390,13 +448,72 @@ impl KsniTray for LinuxTray {
     }
 }
 
-/// Spawn the D-Bus tray service and return the handle + quit flag.
+/// Items of the Recent submenu: the newest conversions, each copying its embed
+/// link back to the clipboard when clicked.
 #[cfg(target_os = "linux")]
-pub fn spawn() -> Result<(Handle<LinuxTray>, Arc<AtomicBool>), ksni::Error> {
+fn recent_items(copy_request: Arc<Mutex<Option<String>>>) -> Vec<MenuItem<LinuxTray>> {
+    let recent = crate::history::recent(crate::history::MENU_ENTRIES);
+    if recent.is_empty() {
+        return vec![StandardItem {
+            label: "(empty)".into(),
+            enabled: false,
+            ..Default::default()
+        }
+        .into()];
+    }
+    recent
+        .into_iter()
+        .map(|entry| {
+            let copy_request = copy_request.clone();
+            StandardItem {
+                // `_` marks a mnemonic in DBusMenu labels; double it to show it literally.
+                label: crate::history::menu_label(&entry).replace('_', "__"),
+                activate: Box::new(move |_tray| {
+                    if let Ok(mut request) = copy_request.lock() {
+                        *request = Some(entry.embed.clone());
+                    }
+                }),
+                ..Default::default()
+            }
+            .into()
+        })
+        .collect()
+}
+
+/// What [`spawn`] hands back to the monitor loop.
+#[cfg(target_os = "linux")]
+pub struct TrayControl {
+    pub handle: Handle<LinuxTray>,
+    pub quit: Arc<AtomicBool>,
+    /// Embed link the user picked from the Recent submenu, waiting to be copied.
+    pub copy_request: Arc<Mutex<Option<String>>>,
+}
+
+/// Spawn the D-Bus tray service.
+#[cfg(target_os = "linux")]
+pub fn spawn() -> Result<TrayControl, ksni::Error> {
     let quit = Arc::new(AtomicBool::new(false));
+    let copy_request = Arc::new(Mutex::new(None));
     let tray = LinuxTray {
         quit_requested: quit.clone(),
+        copy_request: copy_request.clone(),
     };
     let handle = tray.spawn()?;
-    Ok((handle, quit))
+
+    // Re-render the menu whenever the history changes (new conversion, fetched
+    // metadata, clear). The update runs on its own thread: `clear` is invoked
+    // from inside a tray callback, where a blocking update would deadlock.
+    let refresh = handle.clone();
+    crate::history::set_on_change(move || {
+        let refresh = refresh.clone();
+        std::thread::spawn(move || {
+            refresh.update(|_| {});
+        });
+    });
+
+    Ok(TrayControl {
+        handle,
+        quit,
+        copy_request,
+    })
 }
