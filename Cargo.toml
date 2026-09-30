@@ -5,7 +5,7 @@ edition = "2021"
 rust-version = "1.89"
 
 [dependencies]
-arboard = "3"
+arboard = { version = "3", default-features = false }
 dirs = "5"
 
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -23,6 +23,10 @@ windows-sys = { version = "0.61", features = [
 ksni = { version = "0.3", features = ["blocking"] }
 x11rb = { version = "0.13", default-features = false, features = ["xfixes"] }
 wl-clipboard-rs = "0.9"
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 
 [build-dependencies]

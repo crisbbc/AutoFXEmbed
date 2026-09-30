@@ -97,3 +97,31 @@ fn transform_text_transforms_each_newline_separated_url() {
         Some("https://fxtwitter.com/a\nhttps://fixupx.com/b".to_string())
     );
 }
+
+#[test]
+fn transform_text_handles_wrapped_and_punctuated_links() {
+    let cases = [
+        ("(https://x.com/a)", Some("(https://fixupx.com/a)")),
+        (
+            "see [t](https://x.com/a) ok",
+            Some("see [t](https://fixupx.com/a) ok"),
+        ),
+        (
+            "\"https://twitter.com/a\"",
+            Some("\"https://fxtwitter.com/a\""),
+        ),
+        (
+            "look: https://x.com/a.",
+            Some("look: https://fixupx.com/a."),
+        ),
+        ("a https://x.com/a, b", Some("a https://fixupx.com/a, b")),
+        ("<https://x.com/a>", Some("<https://fixupx.com/a>")),
+        ("(x.com/a)", Some("(fixupx.com/a)")),
+        ("https://x.com/A_(b)", Some("https://fixupx.com/A_(b)")),
+        ("(https://example.com/a)", None),
+        ("\"press@x.com\"", None),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(transform_text(input).as_deref(), expected, "input: {input}");
+    }
+}

@@ -16,7 +16,11 @@ pub enum XTarget {
 }
 
 impl XTarget {
-    fn as_str(self) -> &'static str {
+    /// Every target, in discriminant order (`ALL[t as usize] == t`).
+    pub const ALL: [XTarget; 3] = [XTarget::FixUp, XTarget::BoyPussyX, XTarget::MpregX];
+
+    /// Stable identifier persisted in the config file.
+    pub fn id(self) -> &'static str {
         match self {
             XTarget::FixUp => "fixup",
             XTarget::BoyPussyX => "boypussyx",
@@ -24,20 +28,36 @@ impl XTarget {
         }
     }
 
-    fn from_str(s: &str) -> XTarget {
-        match s {
-            "boypussyx" => XTarget::BoyPussyX,
-            "mpregx" => XTarget::MpregX,
-            _ => XTarget::FixUp,
+    /// Human-readable tray menu label.
+    pub fn label(self) -> &'static str {
+        match self {
+            XTarget::FixUp => "FixUpX (fxtwitter / fixupx)",
+            XTarget::BoyPussyX => "BoyPussyX (boypussyx.com)",
+            XTarget::MpregX => "MpregX (mpregx.com)",
         }
     }
 
-    fn from_u8(value: u8) -> XTarget {
-        match value {
-            1 => XTarget::BoyPussyX,
-            2 => XTarget::MpregX,
-            _ => XTarget::FixUp,
+    /// X/Twitter host rewrite rules for this target.
+    pub fn rules(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            XTarget::FixUp => crate::transform::FIXUP_RULES,
+            XTarget::BoyPussyX => crate::transform::BOY_RULES,
+            XTarget::MpregX => crate::transform::MPREG_RULES,
         }
+    }
+
+    fn from_id(s: &str) -> XTarget {
+        Self::ALL
+            .into_iter()
+            .find(|target| target.id() == s)
+            .unwrap_or(XTarget::FixUp)
+    }
+
+    fn from_u8(value: u8) -> XTarget {
+        Self::ALL
+            .get(value as usize)
+            .copied()
+            .unwrap_or(XTarget::FixUp)
     }
 }
 
@@ -54,7 +74,7 @@ pub fn x_target() -> XTarget {
 
 pub fn set_x_target(target: XTarget) {
     X_TARGET.store(target as u8, Ordering::Relaxed);
-    eprintln!("AutoFxEmbed: X target -> {}", target.as_str());
+    eprintln!("AutoFxEmbed: X target -> {}", target.id());
     if let Err(error) = save(target) {
         eprintln!("AutoFxEmbed: unable to save X target: {error}");
     }
@@ -67,7 +87,7 @@ fn save(target: XTarget) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, target.as_str())
+    std::fs::write(path, target.id())
 }
 
 /// Load persisted choice (call once at startup). Missing/invalid file → FixUpX.
@@ -78,10 +98,24 @@ pub fn load() {
     };
     match std::fs::read_to_string(&path) {
         Ok(s) => {
-            let target = XTarget::from_str(s.trim());
-            eprintln!("AutoFxEmbed: load {:?} -> {}", path, target.as_str());
+            let target = XTarget::from_id(s.trim());
+            eprintln!("AutoFxEmbed: load {:?} -> {}", path, target.id());
             X_TARGET.store(target as u8, Ordering::Relaxed);
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => eprintln!("AutoFxEmbed: load {:?} err {e}", path),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_is_in_discriminant_order() {
+        for target in XTarget::ALL {
+            assert_eq!(XTarget::from_u8(target as u8), target);
+            assert_eq!(XTarget::from_id(target.id()), target);
+        }
     }
 }

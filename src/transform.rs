@@ -14,15 +14,7 @@ pub(crate) const MPREG_RULES: &[(&str, &str)] =
     &[("twitter.com", "mpregx.com"), ("x.com", "mpregx.com")];
 
 fn rules() -> &'static [(&'static str, &'static str)] {
-    rules_for(crate::config::x_target())
-}
-
-fn rules_for(target: crate::config::XTarget) -> &'static [(&'static str, &'static str)] {
-    match target {
-        crate::config::XTarget::FixUp => FIXUP_RULES,
-        crate::config::XTarget::BoyPussyX => BOY_RULES,
-        crate::config::XTarget::MpregX => MPREG_RULES,
-    }
+    crate::config::x_target().rules()
 }
 
 /// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
@@ -136,6 +128,49 @@ pub fn transform_text(text: &str) -> Option<String> {
     transform_embedded(text)
 }
 
+/// Rewrite one whitespace-delimited token, tolerating wrapping punctuation such
+/// as `(url)`, `[text](url)`, `"url"`, `<url>` or a trailing `.` / `,`.
+fn transform_token(token: &str) -> Option<String> {
+    if let Some(out) = transform_clipboard(token) {
+        return Some(out);
+    }
+
+    // Prefix: everything before an explicit scheme, else leading opener chars.
+    let lower = token.to_ascii_lowercase();
+    let prefix_len = match (lower.find("https://"), lower.find("http://")) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        (None, None) => token
+            .find(|c: char| !matches!(c, '(' | '[' | '<' | '"' | '\''))
+            .unwrap_or(token.len()),
+    };
+    let (prefix, rest) = token.split_at(prefix_len);
+
+    // Suffix: peel trailing punctuation. A `)` is only peeled when unbalanced,
+    // so `x.com/wiki/A_(b)` stays intact.
+    let mut end = rest.len();
+    while let Some(last) = rest[..end].chars().next_back() {
+        let peel = match last {
+            ']' | '>' | '"' | '\'' | ',' | '.' | '!' | '?' | ';' | ':' => true,
+            ')' => {
+                let head = &rest[..end];
+                head.matches(')').count() > head.matches('(').count()
+            }
+            _ => false,
+        };
+        if !peel {
+            break;
+        }
+        end -= last.len_utf8();
+    }
+    let (core, suffix) = rest.split_at(end);
+    if core.is_empty() || core.len() == token.len() {
+        return None;
+    }
+
+    transform_clipboard(core).map(|rewritten| format!("{prefix}{rewritten}{suffix}"))
+}
+
 /// Scan `text` for URLs embedded in prose and rewrite each one in place.
 /// Whitespace (spaces, tabs, newlines, …) splits tokens and is preserved
 /// verbatim; each non-whitespace token is offered to [`transform_clipboard`].
@@ -146,7 +181,7 @@ fn transform_embedded(text: &str) -> Option<String> {
     // detect that up front and return without allocating in that common case.
     if !text
         .split_whitespace()
-        .any(|token| transform_clipboard(token).is_some())
+        .any(|token| transform_token(token).is_some())
     {
         return None;
     }
@@ -165,7 +200,7 @@ fn transform_embedded(text: &str) -> Option<String> {
         }
         // Next token: everything up to the next whitespace char (or end).
         let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
-        match transform_clipboard(&rest[..end]) {
+        match transform_token(&rest[..end]) {
             Some(rewritten) => out.push_str(&rewritten),
             None => out.push_str(&rest[..end]),
         }
@@ -197,9 +232,11 @@ mod tests {
     #[test]
     fn every_target_has_distinct_rules() {
         use crate::config::XTarget;
-        assert_eq!(rules_for(XTarget::FixUp), FIXUP_RULES);
-        assert_eq!(rules_for(XTarget::BoyPussyX), BOY_RULES);
-        assert_eq!(rules_for(XTarget::MpregX), MPREG_RULES);
+        for (i, a) in XTarget::ALL.iter().enumerate() {
+            for b in &XTarget::ALL[i + 1..] {
+                assert_ne!(a.rules(), b.rules());
+            }
+        }
     }
 
     #[test]

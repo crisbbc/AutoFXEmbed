@@ -501,10 +501,6 @@ mod linux_impl {
         }
     }
 
-    fn preview(text: &str) -> String {
-        text.chars().take(80).collect()
-    }
-
     pub fn run() {
         let (tray_handle, quit_flag) = match crate::tray::spawn() {
             Ok((handle, quit)) => (handle, quit),
@@ -595,20 +591,13 @@ mod linux_impl {
                 // CLIPBOARD selection (Ctrl+C, copy buttons).
                 match clipboard.get_text() {
                     Ok(text) => {
-                        if text != last_text {
-                            was_empty = false;
-                            eprintln!("AutoFxEmbed: read -> {:?}", preview(&text));
-                        }
+                        was_empty = false;
                         if text != last_text
                             && (failed_text.as_deref() != Some(text.as_str())
                                 || Instant::now() >= retry_at)
                         {
                             if let Some(new_text) = transform_text(&text) {
-                                eprintln!(
-                                    "AutoFxEmbed: {} -> {}",
-                                    preview(&text),
-                                    preview(&new_text)
-                                );
+                                eprintln!("AutoFxEmbed: rewrote link(s) in clipboard");
                                 match clipboard.set_text(&new_text) {
                                     Ok(()) => {
                                         if primary_reader.is_some() && set_primary(&new_text) {
@@ -647,11 +636,7 @@ mod linux_impl {
                     || Instant::now() >= primary_retry_at;
                 if text != last_primary && text != last_text && can_retry {
                     if let Some(new_text) = transform_text(&text) {
-                        eprintln!(
-                            "AutoFxEmbed: primary {} -> {}",
-                            preview(&text),
-                            preview(&new_text)
-                        );
+                        eprintln!("AutoFxEmbed: rewrote link(s) in primary selection");
                         // Only PRIMARY is rewritten; the Ctrl+C clipboard is left alone.
                         if set_primary(&new_text) {
                             last_primary = new_text;

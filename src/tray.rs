@@ -25,9 +25,10 @@ use windows_sys::Win32::UI::Shell::{
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MB_ICONINFORMATION,
-    MB_OK, MF_CHECKED, MF_DEFAULT, MF_DISABLED, MF_GRAYED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_NULL, WM_RBUTTONUP,
+    SetForegroundWindow, TrackPopupMenu, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED,
+    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DEFAULT, MF_DISABLED, MF_GRAYED, MF_POPUP,
+    MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_NULL,
+    WM_RBUTTONUP,
 };
 
 /// Custom message Windows sends to our window when the tray icon is interacted with.
@@ -42,12 +43,51 @@ const MENU_QUIT: u32 = 1;
 const MENU_STARTUP: u32 = 2;
 #[cfg(target_os = "windows")]
 const MENU_ABOUT: u32 = 3;
+/// First ID of the X / Twitter target items (`MENU_X_BASE + index in XTarget::ALL`).
 #[cfg(target_os = "windows")]
-const MENU_FIXUP: u32 = 4;
+const MENU_X_BASE: u32 = 100;
+
+/// Owned popup menu handle; destroyed on drop (which also frees any submenu
+/// that was successfully attached to it).
 #[cfg(target_os = "windows")]
-const MENU_BOY: u32 = 5;
+struct Menu(HMENU);
+
 #[cfg(target_os = "windows")]
-const MENU_MPREG: u32 = 6;
+impl Menu {
+    unsafe fn popup() -> Option<Menu> {
+        let handle = CreatePopupMenu();
+        (!handle.is_null()).then(|| Menu(handle))
+    }
+
+    unsafe fn append(&self, flags: u32, id: usize, text: &str) -> bool {
+        let text = crate::clipboard::wide(text);
+        AppendMenuW(self.0, flags, id, text.as_ptr()) != 0
+    }
+
+    unsafe fn separator(&self) -> bool {
+        AppendMenuW(self.0, MF_SEPARATOR, 0, std::ptr::null()) != 0
+    }
+
+    /// Attach `sub` as a popup. On success `self` owns it; on failure `sub`
+    /// is dropped (destroyed) here.
+    unsafe fn append_submenu(&self, sub: Menu, text: &str) -> bool {
+        if self.append(MF_STRING | MF_POPUP, sub.0 as usize, text) {
+            std::mem::forget(sub);
+            true
+        } else {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for Menu {
+    fn drop(&mut self) {
+        unsafe {
+            DestroyMenu(self.0);
+        }
+    }
+}
 
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
@@ -108,73 +148,38 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         return;
     }
 
-    let menu = CreatePopupMenu();
-    if menu.is_null() {
+    let Some(menu) = Menu::popup() else {
         return;
-    }
+    };
 
     // X has a configurable submenu; fixed and upcoming providers are informational.
-    let x_submenu = CreatePopupMenu();
-    if x_submenu.is_null() {
-        DestroyMenu(menu);
+    let Some(x_submenu) = Menu::popup() else {
         return;
-    }
+    };
     let x_target = crate::config::x_target();
-    let checked_if = |target| if x_target == target { MF_CHECKED } else { 0 };
-    let fixup_checked = checked_if(crate::config::XTarget::FixUp);
-    let boy_checked = checked_if(crate::config::XTarget::BoyPussyX);
-    let mpreg_checked = checked_if(crate::config::XTarget::MpregX);
-    if AppendMenuW(
-        x_submenu,
-        MF_STRING | fixup_checked,
-        MENU_FIXUP as usize,
-        crate::clipboard::wide("FixUpX (fxtwitter / fixupx)").as_ptr(),
-    ) == 0
-        || AppendMenuW(
-            x_submenu,
-            MF_STRING | boy_checked,
-            MENU_BOY as usize,
-            crate::clipboard::wide("BoyPussyX (boypussyx.com)").as_ptr(),
-        ) == 0
-        || AppendMenuW(
-            x_submenu,
-            MF_STRING | mpreg_checked,
-            MENU_MPREG as usize,
-            crate::clipboard::wide("MpregX (mpregx.com)").as_ptr(),
-        ) == 0
-    {
-        DestroyMenu(x_submenu);
-        DestroyMenu(menu);
+    for (index, target) in crate::config::XTarget::ALL.into_iter().enumerate() {
+        let checked = if x_target == target { MF_CHECKED } else { 0 };
+        if !x_submenu.append(
+            MF_STRING | checked,
+            (MENU_X_BASE as usize) + index,
+            target.label(),
+        ) {
+            return;
+        }
+    }
+    if !menu.append_submenu(x_submenu, "X / Twitter") {
         return;
     }
-    if AppendMenuW(
-        menu,
-        MF_STRING | MF_POPUP,
-        x_submenu as usize,
-        crate::clipboard::wide("X / Twitter").as_ptr(),
-    ) == 0
-    {
-        // The submenu was never attached, so `DestroyMenu(menu)` won't free it.
-        DestroyMenu(x_submenu);
-        DestroyMenu(menu);
-        return;
-    }
-    // From here on `menu` owns `x_submenu` and frees it on destroy.
-    if AppendMenuW(
-        menu,
+    if !menu.append(
         MF_STRING | MF_GRAYED | MF_DISABLED,
         0,
-        crate::clipboard::wide("Instagram (instagram7.com)").as_ptr(),
-    ) == 0
-        || AppendMenuW(
-            menu,
-            MF_STRING | MF_GRAYED | MF_DISABLED,
-            0,
-            crate::clipboard::wide("TikTok (tnktok.com)").as_ptr(),
-        ) == 0
-        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
+        "Instagram (instagram7.com)",
+    ) || !menu.append(
+        MF_STRING | MF_GRAYED | MF_DISABLED,
+        0,
+        "TikTok (tnktok.com)",
+    ) || !menu.separator()
     {
-        DestroyMenu(menu);
         return;
     }
 
@@ -185,40 +190,17 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         } else {
             0
         };
-    if AppendMenuW(
-        menu,
-        startup_flags,
-        MENU_STARTUP as usize,
-        crate::clipboard::wide("Start on startup").as_ptr(),
-    ) == 0
-        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
-    {
-        DestroyMenu(menu);
+    if !menu.append(startup_flags, MENU_STARTUP as usize, "Start on startup") || !menu.separator() {
         return;
     }
 
     // About (bold — MF_DEFAULT marks it as the default menu item).
-    if AppendMenuW(
-        menu,
-        MF_STRING | MF_DEFAULT,
-        MENU_ABOUT as usize,
-        crate::clipboard::wide("About").as_ptr(),
-    ) == 0
-        || AppendMenuW(menu, MF_SEPARATOR, 0, std::ptr::null()) == 0
-    {
-        DestroyMenu(menu);
+    if !menu.append(MF_STRING | MF_DEFAULT, MENU_ABOUT as usize, "About") || !menu.separator() {
         return;
     }
 
     // Quit.
-    if AppendMenuW(
-        menu,
-        MF_STRING,
-        MENU_QUIT as usize,
-        crate::clipboard::wide("Quit").as_ptr(),
-    ) == 0
-    {
-        DestroyMenu(menu);
+    if !menu.append(MF_STRING, MENU_QUIT as usize, "Quit") {
         return;
     }
 
@@ -228,7 +210,7 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         eprintln!("AutoFxEmbed: failed to foreground tray menu owner");
     }
     let cmd = TrackPopupMenu(
-        menu,
+        menu.0,
         TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
         pt.x,
         pt.y,
@@ -239,12 +221,12 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     if PostMessageW(hwnd, WM_NULL, 0, 0) == 0 {
         eprintln!("AutoFxEmbed: failed to finalize tray menu");
     }
-    DestroyMenu(menu);
+    drop(menu);
 
     match cmd as u32 {
-        MENU_FIXUP => crate::config::set_x_target(crate::config::XTarget::FixUp),
-        MENU_BOY => crate::config::set_x_target(crate::config::XTarget::BoyPussyX),
-        MENU_MPREG => crate::config::set_x_target(crate::config::XTarget::MpregX),
+        c if (MENU_X_BASE..MENU_X_BASE + crate::config::XTarget::ALL.len() as u32).contains(&c) => {
+            crate::config::set_x_target(crate::config::XTarget::ALL[(c - MENU_X_BASE) as usize]);
+        }
         MENU_STARTUP => {
             crate::autostart::toggle();
         }
@@ -325,10 +307,10 @@ impl KsniTray for LinuxTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
         let x_target = crate::config::x_target();
-        let x_item = |target: crate::config::XTarget, name: &str| -> MenuItem<Self> {
+        let x_item = |target: crate::config::XTarget| -> MenuItem<Self> {
             let mark = if x_target == target { "✓" } else { " " };
             StandardItem {
-                label: format!("{mark} {name}"),
+                label: format!("{mark} {}", target.label()),
                 activate: Box::new(move |_tray| {
                     crate::config::set_x_target(target);
                 }),
@@ -339,14 +321,10 @@ impl KsniTray for LinuxTray {
         vec![
             SubMenu {
                 label: "X / Twitter".into(),
-                submenu: vec![
-                    x_item(crate::config::XTarget::FixUp, "FixUpX (fxtwitter / fixupx)"),
-                    x_item(
-                        crate::config::XTarget::BoyPussyX,
-                        "BoyPussyX (boypussyx.com)",
-                    ),
-                    x_item(crate::config::XTarget::MpregX, "MpregX (mpregx.com)"),
-                ],
+                submenu: crate::config::XTarget::ALL
+                    .into_iter()
+                    .map(x_item)
+                    .collect(),
                 ..Default::default()
             }
             .into(),
