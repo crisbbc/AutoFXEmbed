@@ -1,5 +1,5 @@
 //! Selected FxEmbed target for X/Twitter domains.
-//! Persists a single value ("fixup" | "boypussyx" | "mpregx") under the OS config dir.
+//! Persists a single value ("fixup" | "boypussyx" | "mpregx" | "yaoisex" | "faggotx") under the OS config dir.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -13,11 +13,21 @@ pub enum XTarget {
     BoyPussyX = 1,
     /// MpregX (`mpregx.com`).
     MpregX = 2,
+    /// YaoiSex (`yaoisex.com`).
+    YaoiSex = 3,
+    /// FaggotX (`faggotx.com`).
+    FaggotX = 4,
 }
 
 impl XTarget {
     /// Every target, in discriminant order (`ALL[t as usize] == t`).
-    pub const ALL: [XTarget; 3] = [XTarget::FixUp, XTarget::BoyPussyX, XTarget::MpregX];
+    pub const ALL: [XTarget; 5] = [
+        XTarget::FixUp,
+        XTarget::BoyPussyX,
+        XTarget::MpregX,
+        XTarget::YaoiSex,
+        XTarget::FaggotX,
+    ];
 
     /// Stable identifier persisted in the config file.
     pub fn id(self) -> &'static str {
@@ -25,6 +35,8 @@ impl XTarget {
             XTarget::FixUp => "fixup",
             XTarget::BoyPussyX => "boypussyx",
             XTarget::MpregX => "mpregx",
+            XTarget::YaoiSex => "yaoisex",
+            XTarget::FaggotX => "faggotx",
         }
     }
 
@@ -34,6 +46,8 @@ impl XTarget {
             XTarget::FixUp => "FixUpX (fxtwitter / fixupx)",
             XTarget::BoyPussyX => "BoyPussyX (boypussyx.com)",
             XTarget::MpregX => "MpregX (mpregx.com)",
+            XTarget::YaoiSex => "YaoiSex (yaoisex.com)",
+            XTarget::FaggotX => "FaggotX (faggotx.com)",
         }
     }
 
@@ -43,6 +57,8 @@ impl XTarget {
             XTarget::FixUp => crate::transform::FIXUP_RULES,
             XTarget::BoyPussyX => crate::transform::BOY_RULES,
             XTarget::MpregX => crate::transform::MPREG_RULES,
+            XTarget::YaoiSex => crate::transform::YAOI_RULES,
+            XTarget::FaggotX => crate::transform::FAGGOT_RULES,
         }
     }
 

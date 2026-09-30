@@ -12,6 +12,10 @@ pub(crate) const BOY_RULES: &[(&str, &str)] =
     &[("twitter.com", "boypussyx.com"), ("x.com", "boypussyx.com")];
 pub(crate) const MPREG_RULES: &[(&str, &str)] =
     &[("twitter.com", "mpregx.com"), ("x.com", "mpregx.com")];
+pub(crate) const YAOI_RULES: &[(&str, &str)] =
+    &[("twitter.com", "yaoisex.com"), ("x.com", "yaoisex.com")];
+pub(crate) const FAGGOT_RULES: &[(&str, &str)] =
+    &[("twitter.com", "faggotx.com"), ("x.com", "faggotx.com")];
 
 fn rules() -> &'static [(&'static str, &'static str)] {
     crate::config::x_target().rules()
@@ -260,6 +264,38 @@ mod tests {
     }
 
     #[test]
+    fn yaoisex_rules_rewrite_x_and_twitter() {
+        assert_eq!(
+            transform_clipboard_with("https://x.com/user/status/1", YAOI_RULES),
+            Some("https://yaoisex.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://mobile.twitter.com/user/status/1", YAOI_RULES),
+            Some("https://mobile.yaoisex.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://yaoisex.com/user/status/1", YAOI_RULES),
+            None
+        );
+    }
+
+    #[test]
+    fn faggotx_rules_rewrite_x_and_twitter() {
+        assert_eq!(
+            transform_clipboard_with("https://x.com/user/status/1", FAGGOT_RULES),
+            Some("https://faggotx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://mobile.twitter.com/user/status/1", FAGGOT_RULES),
+            Some("https://mobile.faggotx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://faggotx.com/user/status/1", FAGGOT_RULES),
+            None
+        );
+    }
+
+    #[test]
     fn reports_each_rewritten_link() {
         let (out, links) =
             transform_text_links("a (https://x.com/u/status/1) b <https://bsky.app/p/2> c")
@@ -301,7 +337,13 @@ mod tests {
 
     #[test]
     fn common_rules_apply_to_every_target() {
-        for rules in [FIXUP_RULES, BOY_RULES, MPREG_RULES] {
+        for rules in [
+            FIXUP_RULES,
+            BOY_RULES,
+            MPREG_RULES,
+            YAOI_RULES,
+            FAGGOT_RULES,
+        ] {
             assert_eq!(
                 transform_clipboard_with("https://www.tiktok.com/@a/video/1", rules),
                 Some("https://www.tnktok.com/@a/video/1".to_string())

@@ -18,7 +18,7 @@ When the clipboard contains one or more links to one of these services:
 | `instagram.com` | `instagram7.com` |
 | `tiktok.com`    | `tnktok.com`     |
 
-X / Twitter links can instead go to `boypussyx.com` or `mpregx.com`; pick the
+X / Twitter links can instead go to `boypussyx.com`, `mpregx.com`, `yaoisex.com` or `faggotx.com`; pick the
 target from the tray icon's **X / Twitter** submenu (the choice is remembered).
 
 …everything else in the URL (subdomain, optional port, path, query, fragment) is
@@ -83,7 +83,7 @@ process running.
 Copy an X/Twitter, Bluesky, Instagram, or TikTok link; paste it anywhere — it's already embed-friendly.
 Right-click the tray icon for:
 
-- **X / Twitter** — submenu to pick the target (FixUpX, BoyPussyX or MpregX);
+- **X / Twitter** — submenu to pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex or FaggotX);
   the choice is remembered.
 - **Instagram** / **TikTok** — informational (the host each is rewritten to).
 - **Recent** — the last 10 converted links, labeled with their title and
