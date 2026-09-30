@@ -12,7 +12,9 @@
 //! Uses `ksni` (pure-Rust D-Bus StatusNotifierItem) for the tray icon —
 //! zero X11/GTK dependencies, works on both X11 and Wayland.
 //! On native X11 sessions, XFixes selection-owner events wake clipboard
-//! processing; Wayland and unknown environments use a slower fallback poll.
+//! processing; on Wayland, data-control selection events do (see
+//! [`crate::wayland_watch`]). Compositors without data-control and unknown
+//! environments use a slower fallback poll.
 
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
@@ -282,16 +284,49 @@ mod linux_impl {
         rust_connection::RustConnection,
     };
 
-    /// Poll interval for Wayland and other environments without a watcher.
-    /// Native X11 sessions use XFixes events, with a slow safety read because
-    /// XFixes does not report content changes made by the same owner.
-    const FALLBACK_POLL: Duration = Duration::from_millis(30);
+    use crate::wayland_watch::{Change, WaylandWatcher};
+
+    /// Poll interval for compositors without data-control and other
+    /// environments without a watcher. X11 (XFixes) and Wayland (data-control)
+    /// sessions are event-driven, with a slow safety read because ownership
+    /// events do not report content changes made by the same owner.
+    const FALLBACK_POLL: Duration = Duration::from_millis(250);
     const X11_SAFETY_POLL: Duration = Duration::from_secs(5);
     const QUIT_CHECK: Duration = Duration::from_millis(100);
+    const PRIMARY_RESULT_CHECK: Duration = Duration::from_millis(10);
     const MAX_PRIMARY_BYTES: usize = 1024 * 1024;
 
+    /// Whichever event-driven selection watcher the session supports.
+    enum Watcher {
+        X11(Box<X11Watcher>),
+        Wayland(WaylandWatcher),
+    }
+
+    impl Watcher {
+        fn changes(&self) -> &Receiver<Change> {
+            match self {
+                Watcher::X11(watcher) => &watcher.changes,
+                Watcher::Wayland(watcher) => &watcher.changes,
+            }
+        }
+
+        fn shutdown(self) {
+            match self {
+                Watcher::X11(watcher) => watcher.shutdown(),
+                Watcher::Wayland(watcher) => watcher.shutdown(),
+            }
+        }
+
+        fn join(self) {
+            match self {
+                Watcher::X11(watcher) => watcher.join(),
+                Watcher::Wayland(watcher) => watcher.join(),
+            }
+        }
+    }
+
     struct X11Watcher {
-        changes: Receiver<()>,
+        changes: Receiver<Change>,
         shutdown_connection: RustConnection,
         shutdown_atom: xproto::Atom,
         shutdown_window: xproto::Window,
@@ -336,9 +371,7 @@ mod linux_impl {
 
     /// Start an XFixes watcher when the native desktop session is X11.
     ///
-    /// Wayland deliberately falls through: ordinary Wayland clients cannot
-    /// passively observe global clipboard ownership without compositor-specific
-    /// protocols, while arboard remains the portable read/write implementation.
+    /// Wayland sessions fall through to [`WaylandWatcher`] instead.
     fn start_x11_watcher() -> Option<X11Watcher> {
         if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
             return None;
@@ -402,7 +435,7 @@ mod linux_impl {
                     }
                     if event.selection == clipboard_atom
                         && event.subtype == SelectionEvent::SET_SELECTION_OWNER
-                        && sender.send(()).is_err()
+                        && sender.send(Change::Clipboard).is_err()
                     {
                         break;
                     }
@@ -460,6 +493,10 @@ mod linux_impl {
             {
                 self.pending.store(false, Ordering::Release);
             }
+        }
+
+        fn is_pending(&self) -> bool {
+            self.pending.load(Ordering::Acquire)
         }
 
         fn take(&self) -> Option<String> {
@@ -535,7 +572,9 @@ mod linux_impl {
             .is_some()
             .then(PrimaryReader::new);
         let mut was_empty = false;
-        let mut x11_watcher = start_x11_watcher();
+        let mut watcher = WaylandWatcher::start()
+            .map(Watcher::Wayland)
+            .or_else(|| start_x11_watcher().map(|w| Watcher::X11(Box::new(w))));
         let mut next_safety_poll = Instant::now();
 
         loop {
@@ -543,43 +582,70 @@ mod linux_impl {
                 break;
             }
 
-            let (watcher_disconnected, process_clipboard, safety_poll_due) = match x11_watcher
-                .as_ref()
-            {
-                Some(watcher) => {
-                    let now = Instant::now();
-                    let safety_wait = next_safety_poll.saturating_duration_since(now);
-                    let retry_wait = failed_text
-                        .as_ref()
-                        .map(|_| retry_at.saturating_duration_since(now))
-                        .unwrap_or(Duration::MAX);
+            // (watcher gone, CLIPBOARD needs a read, PRIMARY needs a read, safety poll due)
+            let (watcher_disconnected, process_clipboard, primary_changed, safety_poll_due) =
+                match watcher.as_ref() {
+                    Some(active) => {
+                        let now = Instant::now();
+                        let safety_wait = next_safety_poll.saturating_duration_since(now);
+                        let retry_wait = failed_text
+                            .as_ref()
+                            .map(|_| retry_at.saturating_duration_since(now))
+                            .unwrap_or(Duration::MAX);
+                        let primary_wait = failed_primary
+                            .as_ref()
+                            .map(|_| primary_retry_at.saturating_duration_since(now))
+                            .unwrap_or(Duration::MAX);
 
-                    let wait_until = safety_wait.min(retry_wait).min(QUIT_CHECK);
-                    match watcher.changes.recv_timeout(wait_until) {
-                        Ok(()) => {
-                            // Coalesce a burst of owner changes into one read.
-                            watcher.changes.try_iter().for_each(drop);
-                            (false, true, false)
+                        let mut wait_until = safety_wait
+                            .min(retry_wait)
+                            .min(primary_wait)
+                            .min(QUIT_CHECK);
+                        // Pick up an in-flight PRIMARY read promptly.
+                        if primary_reader
+                            .as_ref()
+                            .is_some_and(PrimaryReader::is_pending)
+                        {
+                            wait_until = wait_until.min(PRIMARY_RESULT_CHECK);
                         }
-                        Err(RecvTimeoutError::Timeout) => {
-                            let safety_due = safety_wait <= wait_until;
-                            let retry_due = retry_wait <= wait_until;
-                            (false, safety_due || retry_due, safety_due)
-                        }
-                        Err(RecvTimeoutError::Disconnected) => {
-                            eprintln!("AutoFxEmbed: X11 clipboard watcher stopped; using fallback polling");
-                            (true, true, false)
+                        match active.changes().recv_timeout(wait_until) {
+                            Ok(first) => {
+                                // Coalesce a burst of owner changes into one read.
+                                let mut clipboard_changed = first == Change::Clipboard;
+                                let mut primary_changed = first == Change::Primary;
+                                for change in active.changes().try_iter() {
+                                    clipboard_changed |= change == Change::Clipboard;
+                                    primary_changed |= change == Change::Primary;
+                                }
+                                (false, clipboard_changed, primary_changed, false)
+                            }
+                            Err(RecvTimeoutError::Timeout) => {
+                                let safety_due = safety_wait <= wait_until;
+                                let retry_due = retry_wait <= wait_until;
+                                let primary_due = primary_wait <= wait_until;
+                                (
+                                    false,
+                                    safety_due || retry_due,
+                                    safety_due || primary_due,
+                                    safety_due,
+                                )
+                            }
+                            Err(RecvTimeoutError::Disconnected) => {
+                                eprintln!(
+                                    "AutoFxEmbed: clipboard watcher stopped; using fallback polling"
+                                );
+                                (true, true, true, false)
+                            }
                         }
                     }
-                }
-                None => {
-                    thread::sleep(FALLBACK_POLL);
-                    (false, true, false)
-                }
-            };
+                    None => {
+                        thread::sleep(FALLBACK_POLL);
+                        (false, true, true, false)
+                    }
+                };
             if watcher_disconnected {
-                if let Some(watcher) = x11_watcher.take() {
-                    watcher.join();
+                if let Some(stopped) = watcher.take() {
+                    stopped.join();
                 }
             }
             if safety_poll_due {
@@ -654,13 +720,13 @@ mod linux_impl {
 
             let primary_retry_due = failed_primary.is_none() || Instant::now() >= primary_retry_at;
             if let Some(reader) = &primary_reader {
-                if (process_clipboard || failed_primary.is_some()) && primary_retry_due {
+                if primary_changed && primary_retry_due {
                     reader.request();
                 }
             }
         }
 
-        if let Some(watcher) = x11_watcher {
+        if let Some(watcher) = watcher {
             watcher.shutdown();
         }
 
