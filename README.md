@@ -1,6 +1,6 @@
 # AutoFxEmbed
 
-A tiny Windows background utility that watches your clipboard and rewrites
+A tiny background utility for Windows and Linux (X11 and Wayland) that watches your clipboard and rewrites
 X / Twitter / Bluesky links through [FxEmbed](https://github.com/FxEmbed/FxEmbed), and
 Instagram links through [Instagram7](https://www.instagram7.com/), and TikTok links through
 [fxTikTok](https://github.com/okdargy/fxtiktok) so Discord, Telegram, etc. embed them
@@ -23,15 +23,18 @@ target from the tray icon's **X / Twitter** submenu (the choice is remembered).
 
 …everything else in the URL (subdomain, optional port, path, query, fragment) is
 preserved and the clipboard is updated in place. Already-transformed links,
-non-matching URLs are left untouched; supported links embedded in prose are
-rewritten in place.
+non-matching URLs are left untouched; supported links embedded in prose (including
+ones wrapped in brackets or quotes, like `(https://x.com/…)`) are rewritten in place.
 
-On Windows it uses the clipboard format listener, so it wakes only on real
-clipboard changes — no polling, no CPU at idle. On native X11 sessions, Linux
-uses XFixes selection-owner events plus a slow safety read; Wayland and other
-environments use a 500 ms fallback poll. A system-tray icon (the FxEmbed logo)
-provides a right-click menu with **Start on startup**, a bold **About**, and
-**Quit**.
+Change detection is event-driven wherever possible:
+
+- **Windows** — the clipboard format listener; no polling, no CPU at idle.
+- **X11** — XFixes selection-owner events plus a slow 5 s safety read.
+- **Wayland** — data-control events (`ext-data-control` or `wlr-data-control`).
+  The PRIMARY selection (middle-click paste) is rewritten too. On compositors
+  without data-control (e.g. GNOME) it falls back to a 250 ms poll.
+
+A system-tray icon (the FxEmbed logo) provides a right-click menu (see below).
 
 ## Install
 
@@ -47,30 +50,37 @@ from there or make sure that directory is on your `PATH`.
 
 ## Build
 
-Requires the Rust toolchain with the MSVC linker (`rustup default stable-x86_64-pc-windows-msvc`).
-
 ```bash
 cargo build --release
 ```
 
-The binary is `target/release/autofxembed.exe`.
+**Windows** — requires the Rust toolchain with the MSVC linker
+(`rustup default stable-x86_64-pc-windows-msvc`). The binary is
+`target/release/autofxembed.exe`. Building embeds the FxEmbed icon as a Windows
+resource (`build.rs` via `embed-resource`, which requires `rc.exe` from the
+Windows SDK — included with Visual Studio Build Tools).
 
-Building embeds the FxEmbed icon as a Windows resource (`build.rs` via
-`embed-resource`, which requires `rc.exe` from the Windows SDK — included with
-Visual Studio Build Tools).
+**Linux** — the binary is `target/release/autofxembed`. A desktop with a
+StatusNotifierItem tray is required (KDE Plasma, or GNOME with an AppIndicator
+extension).
 
 ## Run
 
-Double-click `autofxembed.exe` (no console window appears; a tray icon does).
-On Linux, a missing D-Bus StatusNotifier tray is treated as a startup failure
-rather than leaving an unmanageable background process running.
+On Windows, double-click `autofxembed.exe` (no console window appears; a tray
+icon does). On Linux, run `autofxembed`; a missing D-Bus StatusNotifier tray is
+treated as a startup failure rather than leaving an unmanageable background
+process running.
 Copy an X/Twitter, Bluesky, Instagram, or TikTok link; paste it anywhere — it's already embed-friendly.
 Right-click the tray icon for:
 
-- **Start on startup** — checked when AutoFxEmbed will launch at Windows logon
-  (toggles a value under
-  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`).
-- **About** — shows a small message box.
+- **X / Twitter** — submenu to pick the target (FixUpX, BoyPussyX or MpregX);
+  the choice is remembered.
+- **Instagram** / **TikTok** — informational (the host each is rewritten to).
+- **Start on startup** — checked when AutoFxEmbed will launch at login. On
+  Windows this toggles a value under
+  `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates
+  `~/.config/autostart/autofxembed.desktop`.
+- **About** — shows a small message box (a desktop notification on Linux).
 - **Quit** — exits.
 
 ## Tests
@@ -78,7 +88,7 @@ Right-click the tray icon for:
 ```bash
 cargo fmt -- --check
 cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
 (Unit tests cover the pure URL-rewrite logic; platform integration remains
