@@ -45,6 +45,14 @@ const MENU_STARTUP: u32 = 2;
 const MENU_ABOUT: u32 = 3;
 #[cfg(target_os = "windows")]
 const MENU_CLEAR_HISTORY: u32 = 4;
+#[cfg(target_os = "windows")]
+const MENU_ADD_CUSTOM: u32 = 5;
+/// First ID of the custom X target items (`MENU_CUSTOM_BASE + index in the snapshot`).
+#[cfg(target_os = "windows")]
+const MENU_CUSTOM_BASE: u32 = 300;
+/// First ID of the "Remove custom domain" items (same indexing as the custom items).
+#[cfg(target_os = "windows")]
+const MENU_REMOVE_BASE: u32 = 400;
 /// First ID of the Recent items (`MENU_RECENT_BASE + index in the snapshot`).
 #[cfg(target_os = "windows")]
 const MENU_RECENT_BASE: u32 = 200;
@@ -161,14 +169,57 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     let Some(x_submenu) = Menu::popup() else {
         return;
     };
-    let x_target = crate::config::x_target();
+    // Pick up hand edits to custom_domains.txt. The snapshot is kept so a
+    // returned ID maps to the domain that was shown.
+    crate::config::reload_custom();
+    let customs = crate::config::custom_domains();
+    let selection = crate::config::selection();
     for (index, target) in crate::config::XTarget::ALL.into_iter().enumerate() {
-        let checked = if x_target == target { MF_CHECKED } else { 0 };
+        let checked = if selection == crate::config::Selection::Builtin(target) {
+            MF_CHECKED
+        } else {
+            0
+        };
         if !x_submenu.append(
             MF_STRING | checked,
             (MENU_X_BASE as usize) + index,
             target.label(),
         ) {
+            return;
+        }
+    }
+    if !customs.is_empty() && !x_submenu.separator() {
+        return;
+    }
+    for (index, domain) in customs.iter().enumerate() {
+        let checked = if selection == crate::config::Selection::Custom(domain.clone()) {
+            MF_CHECKED
+        } else {
+            0
+        };
+        if !x_submenu.append(
+            MF_STRING | checked,
+            (MENU_CUSTOM_BASE as usize) + index,
+            domain,
+        ) {
+            return;
+        }
+    }
+    if !x_submenu.separator()
+        || !x_submenu.append(MF_STRING, MENU_ADD_CUSTOM as usize, "Add custom domain...")
+    {
+        return;
+    }
+    if !customs.is_empty() {
+        let Some(remove_submenu) = Menu::popup() else {
+            return;
+        };
+        for (index, domain) in customs.iter().enumerate() {
+            if !remove_submenu.append(MF_STRING, (MENU_REMOVE_BASE as usize) + index, domain) {
+                return;
+            }
+        }
+        if !x_submenu.append_submenu(remove_submenu, "Remove custom domain") {
             return;
         }
     }
@@ -251,7 +302,16 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
 
     match cmd as u32 {
         c if (MENU_X_BASE..MENU_X_BASE + crate::config::XTarget::ALL.len() as u32).contains(&c) => {
-            crate::config::set_x_target(crate::config::XTarget::ALL[(c - MENU_X_BASE) as usize]);
+            crate::config::select_builtin(crate::config::XTarget::ALL[(c - MENU_X_BASE) as usize]);
+        }
+        c if (MENU_CUSTOM_BASE..MENU_CUSTOM_BASE + customs.len() as u32).contains(&c) => {
+            crate::config::select_custom(&customs[(c - MENU_CUSTOM_BASE) as usize]);
+        }
+        c if (MENU_REMOVE_BASE..MENU_REMOVE_BASE + customs.len() as u32).contains(&c) => {
+            crate::config::remove_custom(&customs[(c - MENU_REMOVE_BASE) as usize]);
+        }
+        MENU_ADD_CUSTOM => {
+            crate::dialog::add_custom_domain();
         }
         c if (MENU_RECENT_BASE..MENU_RECENT_BASE + recent.len() as u32).contains(&c) => {
             let entry = &recent[(c - MENU_RECENT_BASE) as usize];
@@ -345,25 +405,10 @@ impl KsniTray for LinuxTray {
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
         let copy_request = self.copy_request.clone();
-        let x_target = crate::config::x_target();
-        let x_item = |target: crate::config::XTarget| -> MenuItem<Self> {
-            let mark = if x_target == target { "✓" } else { " " };
-            StandardItem {
-                label: format!("{mark} {}", target.label()),
-                activate: Box::new(move |_tray| {
-                    crate::config::set_x_target(target);
-                }),
-                ..Default::default()
-            }
-            .into()
-        };
         vec![
             SubMenu {
                 label: "X / Twitter".into(),
-                submenu: crate::config::XTarget::ALL
-                    .into_iter()
-                    .map(x_item)
-                    .collect(),
+                submenu: x_items(),
                 ..Default::default()
             }
             .into(),
@@ -402,25 +447,10 @@ impl KsniTray for LinuxTray {
             StandardItem {
                 label: "About".into(),
                 activate: Box::new(|_tray| {
-                    // Best-effort desktop notification (ignore failures). The child
-                    // is reaped on a helper thread so it never lingers as a zombie.
-                    match std::process::Command::new("notify-send")
-                        .args([
-                            "--app-name=AutoFxEmbed",
-                            "About AutoFxEmbed",
-                            "Made by Cris with much <3 for his friends",
-                        ])
-                        .spawn()
-                    {
-                        Ok(mut child) => {
-                            std::thread::spawn(move || {
-                                let _ = child.wait();
-                            });
-                        }
-                        Err(error) => {
-                            eprintln!("AutoFxEmbed: unable to show About notification: {error}");
-                        }
-                    }
+                    crate::dialog::notify(
+                        "About AutoFxEmbed",
+                        "Made by Cris with much <3 for his friends",
+                    );
                 }),
                 ..Default::default()
             }
@@ -436,6 +466,81 @@ impl KsniTray for LinuxTray {
             .into(),
         ]
     }
+}
+
+/// Items of the X / Twitter submenu: the built-in targets, the user's custom
+/// domains, and the add / remove entries. Re-reads `custom_domains.txt` first.
+#[cfg(target_os = "linux")]
+fn x_items() -> Vec<MenuItem<LinuxTray>> {
+    use crate::config::{self, Selection, XTarget};
+
+    config::reload_custom();
+    let selection = config::selection();
+    let customs = config::custom_domains();
+    let mark = |selected: bool| if selected { "✓" } else { " " };
+
+    let mut items: Vec<MenuItem<LinuxTray>> = XTarget::ALL
+        .into_iter()
+        .map(|target| {
+            StandardItem {
+                label: format!(
+                    "{} {}",
+                    mark(selection == Selection::Builtin(target)),
+                    target.label()
+                ),
+                activate: Box::new(move |_tray| config::select_builtin(target)),
+                ..Default::default()
+            }
+            .into()
+        })
+        .collect();
+
+    if !customs.is_empty() {
+        items.push(MenuItem::Separator);
+        for domain in &customs {
+            let selected = selection == Selection::Custom(domain.clone());
+            let domain = domain.clone();
+            items.push(
+                StandardItem {
+                    label: format!("{} {domain}", mark(selected)),
+                    activate: Box::new(move |_tray| config::select_custom(&domain)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+    }
+
+    items.push(MenuItem::Separator);
+    items.push(
+        StandardItem {
+            label: "Add custom domain...".into(),
+            activate: Box::new(|_tray| crate::dialog::add_custom_domain()),
+            ..Default::default()
+        }
+        .into(),
+    );
+    if !customs.is_empty() {
+        items.push(
+            SubMenu {
+                label: "Remove custom domain".into(),
+                submenu: customs
+                    .into_iter()
+                    .map(|domain| {
+                        StandardItem {
+                            label: domain.clone(),
+                            activate: Box::new(move |_tray| config::remove_custom(&domain)),
+                            ..Default::default()
+                        }
+                        .into()
+                    })
+                    .collect(),
+                ..Default::default()
+            }
+            .into(),
+        );
+    }
+    items
 }
 
 /// Items of the Recent submenu: the newest conversions, each copying its embed
@@ -490,16 +595,19 @@ pub fn spawn() -> Result<TrayControl, ksni::Error> {
     };
     let handle = tray.spawn()?;
 
-    // Re-render the menu whenever the history changes (new conversion, fetched
-    // metadata, clear). The update runs on its own thread: `clear` is invoked
-    // from inside a tray callback, where a blocking update would deadlock.
+    // Re-render the menu whenever the history or the custom domains change (new
+    // conversion, fetched metadata, clear, domain added / removed). The update
+    // runs on its own thread: `clear` and `remove_custom` are invoked from inside
+    // a tray callback, where a blocking update would deadlock.
     let refresh = handle.clone();
-    crate::history::set_on_change(move || {
+    let refresh_menu = move || {
         let refresh = refresh.clone();
         std::thread::spawn(move || {
             refresh.update(|_| {});
         });
-    });
+    };
+    crate::config::set_on_change(refresh_menu.clone());
+    crate::history::set_on_change(refresh_menu);
 
     Ok(TrayControl {
         handle,

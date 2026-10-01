@@ -67,6 +67,23 @@ icon's **X / Twitter** submenu; the choice is remembered.
 > domains, their names, their content, or how they are used. The default is
 > FixUpX; choosing any other target is entirely your call.
 
+### Your own domain
+
+Know another FxEmbed-style mirror? In the **X / Twitter** submenu, click
+**Add custom domain...** and type it (`myfx.com`, or a full URL; only the host
+is kept). It is selected right away, and `x.com` / `twitter.com` links will be
+rewritten to it. Use **Remove custom domain** to forget one again.
+
+- The dialog is a PowerShell input box on Windows, and `kdialog` or `zenity`
+  on Linux. If neither is installed, the domain list opens in your editor instead.
+- Domains are stored one per line in `<config dir>/autofxembed/custom_domains.txt`
+  (`~/.config/autofxembed/` on Linux). You can edit it by hand; lines starting
+  with `#` are ignored, and changes show up the next time you open the menu.
+- Domains that would be rewritten again (`x.com`, `twitter.com` and their
+  subdomains) and the built-in hosts above are rejected.
+- As with the built-ins, custom domains are third-party services. You are
+  responsible for the ones you add.
+
 ## Install
 
 Install the latest version straight from this repository with Cargo:
@@ -96,7 +113,7 @@ Right-click the tray icon for:
 
 | Item                | What it does                                                      |
 |---------------------|-------------------------------------------------------------------|
-| **X / Twitter**     | Submenu to pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex or FaggotX). The choice is remembered. |
+| **X / Twitter**     | Submenu to pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own). The choice is remembered. Also has **Add custom domain...** and **Remove custom domain**. |
 | **TikTok**          | Informational: shows the host it is rewritten to.                 |
 | **Recent**          | The last 10 converted links, labeled with their title and description. Click one to copy its embed link again. |
 | **Clear history**   | Forgets every stored link.                                        |

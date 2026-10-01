@@ -13,10 +13,6 @@ pub(crate) const YAOI_RULES: &[(&str, &str)] =
 pub(crate) const FAGGOT_RULES: &[(&str, &str)] =
     &[("twitter.com", "faggotx.com"), ("x.com", "faggotx.com")];
 
-fn rules() -> &'static [(&'static str, &'static str)] {
-    crate::config::x_target().rules()
-}
-
 /// True if `host` is exactly `domain` or a subdomain of it (`*.domain`).
 fn host_matches(host: &str, domain: &str) -> bool {
     if host.eq_ignore_ascii_case(domain) {
@@ -50,7 +46,7 @@ fn authority_host_range(authority: &str) -> Option<(usize, usize)> {
 /// If `text` is a single supported social-media URL, return its embed-friendly form.
 /// Otherwise return `None` (leave the clipboard untouched).
 pub fn transform_clipboard(text: &str) -> Option<String> {
-    transform_clipboard_with(text, rules())
+    crate::config::with_x_rules(|rules| transform_clipboard_with(text, rules))
 }
 
 /// Same as [`transform_clipboard`] but with an explicit X/Twitter rule set (for
@@ -255,6 +251,25 @@ mod tests {
         );
         assert_eq!(
             transform_clipboard_with("https://mpregx.com/user/status/1", MPREG_RULES),
+            None
+        );
+    }
+
+    #[test]
+    fn custom_domain_rules_rewrite_x_and_twitter() {
+        // Same shape `config::with_x_rules` builds for a custom selection.
+        let domain = "myfx.com";
+        let rules = [("twitter.com", domain), ("x.com", domain)];
+        assert_eq!(
+            transform_clipboard_with("https://x.com/user/status/1", &rules),
+            Some("https://myfx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://mobile.twitter.com/user/status/1", &rules),
+            Some("https://mobile.myfx.com/user/status/1".to_string())
+        );
+        assert_eq!(
+            transform_clipboard_with("https://myfx.com/user/status/1", &rules),
             None
         );
     }
