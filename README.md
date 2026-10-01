@@ -21,6 +21,12 @@ When the clipboard contains one or more links to one of these services:
 X / Twitter links can instead go to `boypussyx.com`, `mpregx.com`, `yaoisex.com` or `faggotx.com`; pick the
 target from the tray icon's **X / Twitter** submenu (the choice is remembered).
 
+> **Disclaimer:** some of these alternative domains have names that may be
+> offensive or NSFW. They are third-party services that I don't own, operate or
+> control, and they are included only as optional targets. I'm not responsible
+> for those domains, their names, their content, or how they are used. The
+> default is FixUpX; choosing any other target is entirely your call.
+
 …everything else in the URL (subdomain, optional port, path, query, fragment) is
 preserved and the clipboard is updated in place. Already-transformed links,
 non-matching URLs are left untouched; supported links embedded in prose (including
