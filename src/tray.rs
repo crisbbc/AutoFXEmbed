@@ -194,10 +194,10 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     let Some(recent_submenu) = Menu::popup() else {
         return;
     };
-    if recent.is_empty() {
-        if !recent_submenu.append(MF_STRING | MF_GRAYED | MF_DISABLED, 0, "(empty)") {
-            return;
-        }
+    if recent.is_empty()
+        && !recent_submenu.append(MF_STRING | MF_GRAYED | MF_DISABLED, 0, "(empty)")
+    {
+        return;
     }
     for (index, entry) in recent.iter().enumerate() {
         // `&` marks a mnemonic in Win32 menus; double it to show it literally.

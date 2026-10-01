@@ -77,7 +77,6 @@ mod win {
     }
 
     /// Entry point: set up the window + listener, run the message loop, clean up.
-
     pub fn run() {
         unsafe {
             let class_name = clipboard::wide("AutoFxEmbedListener");
