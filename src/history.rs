@@ -5,7 +5,7 @@
 //! JSON under the OS config dir. The embed metadata is read from the OpenGraph
 //! tags of the rewritten URL by a single background worker, so the clipboard
 //! loop never waits on the network. A link whose read fails (request error,
-//! redirect to another host, no embed data) is removed again.
+//! redirect to an unrelated page, no embed data) is removed again.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -228,8 +228,8 @@ fn queue_fetch(embed: String) {
 }
 
 /// Read the embed data of `url`. `None` means the read failed: the request
-/// errored, it was redirected to another host (a bare `fixupx.com` bounces to
-/// GitHub), or the page has no embed data.
+/// errored, it was redirected to an unrelated page (a bare `fixupx.com` bounces
+/// to GitHub), or the page has no embed data.
 fn fetch_og(agent: &ureq::Agent, url: &str) -> Option<Og> {
     use ureq::ResponseExt;
     let response = agent.get(url).call().ok()?;
@@ -250,11 +250,21 @@ fn host_of(url: &str) -> Option<String> {
     uri.host().map(str::to_ascii_lowercase)
 }
 
+fn path_of(url: &str) -> Option<String> {
+    let uri: ureq::http::Uri = url.parse().ok()?;
+    Some(uri.path().to_string())
+}
+
 /// Whether a fetched page is a usable embed of `embed`: it stayed on the same
-/// host and carries a title or description.
+/// host, or was forwarded to another embed host with the same path (some
+/// targets redirect to e.g. `vxtwitter.com`), and carries a title or
+/// description. A bare host bouncing to an unrelated page changes the path and
+/// is rejected.
 fn is_embed(embed: &str, final_uri: &str, og: &Og) -> bool {
-    host_of(embed).is_some_and(|host| host_of(final_uri).as_deref() == Some(host.as_str()))
-        && (og.title.is_some() || og.description.is_some())
+    let same_host =
+        host_of(embed).is_some_and(|host| host_of(final_uri).as_deref() == Some(host.as_str()));
+    let same_path = path_of(embed).is_some_and(|path| path_of(final_uri) == Some(path));
+    (same_host || same_path) && (og.title.is_some() || og.description.is_some())
 }
 
 /// Apply a finished fetch to the list: fill in the metadata, or drop the entry
@@ -475,7 +485,17 @@ mod tests {
     }
 
     #[test]
-    fn embeds_must_stay_on_host_and_have_data() {
+    fn embeds_must_stay_on_host_or_path_and_have_data() {
+        assert!(is_embed(
+            "https://mpregx.com/u/status/1",
+            "https://vxtwitter.com/u/status/1",
+            &og_with_title()
+        ));
+        assert!(!is_embed(
+            "https://mpregx.com/u/status/1",
+            "https://vxtwitter.com/other",
+            &og_with_title()
+        ));
         let embed = "https://fixupx.com/";
         assert!(is_embed(
             embed,
