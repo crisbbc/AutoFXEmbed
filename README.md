@@ -13,6 +13,9 @@
   <a href="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml">
     <img src="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml/badge.svg" alt="CI status">
   </a>
+  <a href="https://github.com/crisbbc/AutoFXEmbed/releases/latest">
+    <img src="https://img.shields.io/github/v/release/crisbbc/AutoFXEmbed" alt="Latest release">
+  </a>
 </p>
 
 <p align="center">
@@ -86,7 +89,17 @@ rewritten to it. Use **Remove custom domain** to forget one again.
 
 ## Install
 
-Install the latest version straight from this repository with Cargo:
+### Download a release
+
+Grab a prebuilt binary from the
+[latest release](https://github.com/crisbbc/AutoFXEmbed/releases/latest):
+
+- **Windows:** `autofxembed-windows-x86_64.exe`
+- **Linux:** `autofxembed-linux-x86_64` (run `chmod +x` on it first)
+
+### Build with Cargo
+
+Or install the latest source straight from this repository with Cargo:
 
 ```bash
 cargo install --git https://github.com/crisbbc/AutoFXEmbed.git --locked
