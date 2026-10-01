@@ -25,10 +25,10 @@ fn transforms_bsky_https() {
 }
 
 #[test]
-fn transforms_instagram_https() {
+fn leaves_instagram_untouched() {
     assert_eq!(
         transform_clipboard("https://www.instagram.com/reel/ABC123/?utm_source=ig_web_copy_link"),
-        Some("https://www.instagram7.com/reel/ABC123/?utm_source=ig_web_copy_link".to_string())
+        None
     );
 }
 

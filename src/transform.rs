@@ -1,9 +1,5 @@
 /// Rewrites shared by every X/Twitter target.
-const COMMON_RULES: &[(&str, &str)] = &[
-    ("bsky.app", "fxbsky.app"),
-    ("instagram.com", "instagram7.com"),
-    ("tiktok.com", "tnktok.com"),
-];
+const COMMON_RULES: &[(&str, &str)] = &[("bsky.app", "fxbsky.app"), ("tiktok.com", "tnktok.com")];
 
 /// X/Twitter (original host, embed-friendly host) rules per target.
 pub(crate) const FIXUP_RULES: &[(&str, &str)] =
@@ -58,7 +54,7 @@ pub fn transform_clipboard(text: &str) -> Option<String> {
 }
 
 /// Same as [`transform_clipboard`] but with an explicit X/Twitter rule set (for
-/// tests); the shared Bluesky/Instagram/TikTok rules always apply.
+/// tests); the shared Bluesky/TikTok rules always apply.
 pub(crate) fn transform_clipboard_with(text: &str, x_rules: &[(&str, &str)]) -> Option<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {

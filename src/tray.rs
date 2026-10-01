@@ -178,10 +178,6 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     if !menu.append(
         MF_STRING | MF_GRAYED | MF_DISABLED,
         0,
-        "Instagram (instagram7.com)",
-    ) || !menu.append(
-        MF_STRING | MF_GRAYED | MF_DISABLED,
-        0,
         "TikTok (tnktok.com)",
     ) || !menu.separator()
     {
@@ -368,12 +364,6 @@ impl KsniTray for LinuxTray {
                     .into_iter()
                     .map(x_item)
                     .collect(),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Instagram (instagram7.com)".into(),
-                enabled: false,
                 ..Default::default()
             }
             .into(),

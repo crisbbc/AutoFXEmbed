@@ -26,10 +26,9 @@
 ---
 
 AutoFxEmbed runs in the background on Windows and Linux (X11 and Wayland). It
-watches the clipboard, and when you copy an X / Twitter, Bluesky, Instagram or
-TikTok link it swaps in an embed-friendly host through
-[FxEmbed](https://github.com/FxEmbed/FxEmbed),
-[Instagram7](https://www.instagram7.com/) or
+watches the clipboard, and when you copy an X / Twitter, Bluesky or TikTok link
+it swaps in an embed-friendly host through
+[FxEmbed](https://github.com/FxEmbed/FxEmbed) or
 [fxTikTok](https://github.com/okdargy/fxtiktok). Paste it anywhere and it just
 works.
 
@@ -40,7 +39,6 @@ works.
 | X / Twitter   | `twitter.com`   | `fxtwitter.com`  |
 | X / Twitter   | `x.com`         | `fixupx.com`     |
 | Bluesky       | `bsky.app`      | `fxbsky.app`     |
-| Instagram     | `instagram.com` | `instagram7.com` |
 | TikTok        | `tiktok.com`    | `tnktok.com`     |
 
 - Everything else in the URL is preserved: subdomain, port, path, query and
@@ -89,7 +87,7 @@ there, or make sure that directory is on your `PATH`.
   as a startup failure, rather than leaving an unmanageable background process
   running.
 
-Then copy an X / Twitter, Bluesky, Instagram or TikTok link and paste it
+Then copy an X / Twitter, Bluesky or TikTok link and paste it
 anywhere. It is already embed-friendly.
 
 ## Tray menu
@@ -99,7 +97,7 @@ Right-click the tray icon for:
 | Item                | What it does                                                      |
 |---------------------|-------------------------------------------------------------------|
 | **X / Twitter**     | Submenu to pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex or FaggotX). The choice is remembered. |
-| **Instagram** / **TikTok** | Informational: shows the host each one is rewritten to.    |
+| **TikTok**          | Informational: shows the host it is rewritten to.                 |
 | **Recent**          | The last 10 converted links, labeled with their title and description. Click one to copy its embed link again. |
 | **Clear history**   | Forgets every stored link.                                        |
 | **Start on startup** | Checked when AutoFxEmbed will launch at login. On Windows this toggles a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates `~/.config/autostart/autofxembed.desktop`. |
