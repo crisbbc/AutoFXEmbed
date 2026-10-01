@@ -10,12 +10,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml">
-    <img src="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml/badge.svg" alt="CI status">
-  </a>
-  <a href="https://github.com/crisbbc/AutoFXEmbed/releases/latest">
-    <img src="https://img.shields.io/github/v/release/crisbbc/AutoFXEmbed" alt="Latest release">
-  </a>
+  <a href="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml"><img src="https://github.com/crisbbc/AutoFXEmbed/actions/workflows/ci.yml/badge.svg" alt="CI status"></a>
+  <a href="https://github.com/crisbbc/AutoFXEmbed/releases/latest"><img src="https://img.shields.io/github/v/release/crisbbc/AutoFXEmbed" alt="Latest release"></a>
 </p>
 
 <p align="center">
