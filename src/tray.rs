@@ -55,7 +55,6 @@ const MENU_OPEN: u32 = 1;
 #[cfg(target_os = "windows")]
 const MENU_QUIT: u32 = 2;
 
-
 /// Owned popup menu handle; destroyed on drop (which also frees any submenu
 /// that was successfully attached to it).
 #[cfg(target_os = "windows")]
@@ -189,7 +188,6 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     }
 }
 
-
 // ---------------------------------------------------------------------------
 // Linux implementation (ksni / D-Bus StatusNotifierItem)
 // ---------------------------------------------------------------------------
@@ -213,7 +211,6 @@ pub struct LinuxTray {
     /// Set to `true` from the Quit menu callback; the monitor loop reads it.
     pub quit_requested: Arc<AtomicBool>,
 }
-
 
 #[cfg(target_os = "linux")]
 impl KsniTray for LinuxTray {

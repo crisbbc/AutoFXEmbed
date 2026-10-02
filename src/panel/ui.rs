@@ -118,7 +118,8 @@ impl App {
         };
         let scale = ctx.pixels_per_point();
         let (ax, ay) = (ax / scale, ay / scale);
-        let x = (ax - SIZE[0] / 2.0).clamp(EDGE_GAP, (monitor.x - SIZE[0] - EDGE_GAP).max(EDGE_GAP));
+        let x =
+            (ax - SIZE[0] / 2.0).clamp(EDGE_GAP, (monitor.x - SIZE[0] - EDGE_GAP).max(EDGE_GAP));
         // Taskbars sit at the bottom or top: open away from the nearer edge.
         let y = if ay > monitor.y / 2.0 {
             ay - SIZE[1] - EDGE_GAP
@@ -200,7 +201,12 @@ impl App {
             ui.add_space(2.0);
             ui.vertical(|ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ui.label(RichText::new("AutoFxEmbed").size(16.0).strong().color(pal.text));
+                ui.label(
+                    RichText::new("AutoFxEmbed")
+                        .size(16.0)
+                        .strong()
+                        .color(pal.text),
+                );
                 ui.label(
                     RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
                         .size(11.0)
@@ -322,12 +328,21 @@ impl App {
                 self.send(&Action::ToggleStartup);
             }
             divider(ui, pal);
-            if switch_row(ui, pal, "Check for updates automatically", &mut self.state.auto_update) {
+            if switch_row(
+                ui,
+                pal,
+                "Check for updates automatically",
+                &mut self.state.auto_update,
+            ) {
                 self.send(&Action::ToggleAutoUpdate);
             }
             divider(ui, pal);
             let checking = self.checking.is_some_and(|at| at.elapsed() < TOAST * 2);
-            let label = if checking { "Checking for updates…" } else { "Check for updates now" };
+            let label = if checking {
+                "Checking for updates…"
+            } else {
+                "Check for updates now"
+            };
             if action_row(ui, pal, label, pal.accent, !checking).clicked() {
                 self.send(&Action::CheckUpdate);
                 self.checking = Some(Instant::now());
@@ -478,7 +493,9 @@ fn divider(ui: &mut egui::Ui, pal: Palette) {
 
 /// Hover / press background shared by every clickable row.
 fn row_background(ui: &egui::Ui, pal: Palette, rect: Rect, response: &egui::Response) {
-    let t = ui.ctx().animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("hover"), response.hovered(), 0.12);
     if t > 0.0 {
         let fill = if response.is_pointer_button_down_on() {
             pal.hover.gamma_multiply(1.4)
@@ -526,23 +543,37 @@ fn choice_row(
         ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), Sense::click());
     row_background(ui, pal, rect, &response);
 
-    let t = ui.ctx().animate_bool_with_time(response.id.with("sel"), selected, 0.15);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id.with("sel"), selected, 0.15);
     let dot = Pos2::new(rect.left() + 16.0, rect.center().y);
     let ring = pal.weak.lerp_to_gamma(pal.accent, t);
-    ui.painter().circle_stroke(dot, 7.0, Stroke::new(1.5_f32, ring));
+    ui.painter()
+        .circle_stroke(dot, 7.0, Stroke::new(1.5_f32, ring));
     if t > 0.0 {
         ui.painter().circle_filled(dot, 4.0 * t, pal.accent);
     }
 
     let mut removed = false;
     let right_reserved = if removable {
-        let btn = Rect::from_center_size(Pos2::new(rect.right() - 18.0, rect.center().y), Vec2::splat(22.0));
+        let btn = Rect::from_center_size(
+            Pos2::new(rect.right() - 18.0, rect.center().y),
+            Vec2::splat(22.0),
+        );
         let hovered_row = response.hovered() || ui.rect_contains_pointer(btn);
         if hovered_row {
             let btn_response = ui.interact(btn, response.id.with("remove"), Sense::click());
-            let color = if btn_response.hovered() { pal.danger } else { pal.weak };
+            let color = if btn_response.hovered() {
+                pal.danger
+            } else {
+                pal.weak
+            };
             if btn_response.hovered() {
-                ui.painter().rect_filled(btn, CornerRadius::same(6), pal.danger.gamma_multiply(0.15));
+                ui.painter().rect_filled(
+                    btn,
+                    CornerRadius::same(6),
+                    pal.danger.gamma_multiply(0.15),
+                );
             }
             draw_cross(ui, btn.center(), 4.0, Stroke::new(1.5_f32, color));
             removed = btn_response.on_hover_text("Remove domain").clicked();
@@ -571,7 +602,11 @@ fn choice_row(
         host_rect.width() + 18.0
     };
 
-    let name_color = if selected { pal.text } else { pal.text.gamma_multiply(0.85) };
+    let name_color = if selected {
+        pal.text
+    } else {
+        pal.text.gamma_multiply(0.85)
+    };
     painted_text(
         ui,
         Pos2::new(rect.left() + 32.0, rect.center().y),
@@ -582,17 +617,34 @@ fn choice_row(
         rect.width() - 32.0 - right_reserved,
     );
 
-    let clicked = response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() && !removed;
+    let clicked = response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+        && !removed;
     RowResponse { clicked, removed }
 }
 
 /// A history entry: a site monogram, the title, and the embed link.
-fn recent_row(ui: &mut egui::Ui, pal: Palette, site: &str, title: &str, embed: &str) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
+fn recent_row(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    site: &str,
+    title: &str,
+    embed: &str,
+) -> egui::Response {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
     row_background(ui, pal, rect, &response);
 
-    let badge = Rect::from_center_size(Pos2::new(rect.left() + 20.0, rect.center().y), Vec2::splat(26.0));
-    ui.painter().rect_filled(badge, CornerRadius::same(7), pal.accent.gamma_multiply(0.18));
+    let badge = Rect::from_center_size(
+        Pos2::new(rect.left() + 20.0, rect.center().y),
+        Vec2::splat(26.0),
+    );
+    ui.painter().rect_filled(
+        badge,
+        CornerRadius::same(7),
+        pal.accent.gamma_multiply(0.18),
+    );
     let initial = site
         .chars()
         .chain(title.chars())
@@ -618,7 +670,9 @@ fn recent_row(ui: &mut egui::Ui, pal: Palette, site: &str, title: &str, embed: &
         pal.text,
         width,
     );
-    let link = embed.trim_start_matches("https://").trim_start_matches("http://");
+    let link = embed
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
     painted_text(
         ui,
         Pos2::new(text_left, rect.top() + 23.0),
@@ -653,20 +707,39 @@ fn switch_row(ui: &mut egui::Ui, pal: Palette, label: &str, on: &mut bool) -> bo
         rect.width() - 64.0,
     );
 
-    let track = Rect::from_center_size(Pos2::new(rect.right() - 28.0, rect.center().y), Vec2::new(34.0, 20.0));
+    let track = Rect::from_center_size(
+        Pos2::new(rect.right() - 28.0, rect.center().y),
+        Vec2::new(34.0, 20.0),
+    );
     let t = ui.ctx().animate_bool_with_time(response.id, *on, 0.15);
     let radius = track.height() / 2.0;
-    ui.painter().rect_filled(track, radius, pal.border.lerp_to_gamma(pal.accent, t));
+    ui.painter()
+        .rect_filled(track, radius, pal.border.lerp_to_gamma(pal.accent, t));
     let knob_x = track.left() + radius + (track.width() - 2.0 * radius) * t;
-    ui.painter().circle_filled(Pos2::new(knob_x, track.center().y), radius - 3.0, Color32::WHITE);
+    ui.painter().circle_filled(
+        Pos2::new(knob_x, track.center().y),
+        radius - 3.0,
+        Color32::WHITE,
+    );
     response.on_hover_cursor(egui::CursorIcon::PointingHand);
     flipped
 }
 
 /// A full-width row that triggers something, with accent-colored text.
-fn action_row(ui: &mut egui::Ui, pal: Palette, label: &str, color: Color32, enabled: bool) -> egui::Response {
-    let sense = if enabled { Sense::click() } else { Sense::hover() };
-    let (rect, response) = ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), sense);
+fn action_row(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    label: &str,
+    color: Color32,
+    enabled: bool,
+) -> egui::Response {
+    let sense = if enabled {
+        Sense::click()
+    } else {
+        Sense::hover()
+    };
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), ROW_HEIGHT), sense);
     if enabled {
         row_background(ui, pal, rect, &response);
     }
@@ -718,7 +791,8 @@ fn link_button(ui: &mut egui::Ui, pal: Palette, label: &str) -> egui::Response {
     );
     if response.hovered() {
         let r = response.rect;
-        ui.painter().hline(r.x_range(), r.bottom(), Stroke::new(1.0_f32, pal.accent));
+        ui.painter()
+            .hline(r.x_range(), r.bottom(), Stroke::new(1.0_f32, pal.accent));
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
@@ -736,13 +810,18 @@ fn pill(ui: &mut egui::Ui, text: &str, color: Color32) {
 fn quit_button(ui: &mut egui::Ui, pal: Palette) -> egui::Response {
     let (rect, response) =
         ui.allocate_exact_size(Vec2::new(ui.available_width(), 34.0), Sense::click());
-    let t = ui.ctx().animate_bool_with_time(response.id, response.hovered(), 0.12);
+    let t = ui
+        .ctx()
+        .animate_bool_with_time(response.id, response.hovered(), 0.12);
     let fill = pal.card.lerp_to_gamma(pal.danger.gamma_multiply(0.18), t);
     ui.painter().rect(
         rect,
         CornerRadius::same(9),
         fill,
-        Stroke::new(1.0_f32, pal.border.lerp_to_gamma(pal.danger.gamma_multiply(0.6), t)),
+        Stroke::new(
+            1.0_f32,
+            pal.border.lerp_to_gamma(pal.danger.gamma_multiply(0.6), t),
+        ),
         StrokeKind::Inside,
     );
     ui.painter().text(
@@ -764,7 +843,8 @@ enum Icon {
 fn icon_button(ui: &mut egui::Ui, icon: Icon, pal: Palette, active: bool) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(28.0), Sense::click());
     if response.hovered() || active {
-        ui.painter().rect_filled(rect, CornerRadius::same(8), pal.hover);
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(8), pal.hover);
     }
     let color = if active { pal.accent } else { pal.weak };
     let stroke = Stroke::new(1.5_f32, color);
@@ -774,15 +854,18 @@ fn icon_button(ui: &mut egui::Ui, icon: Icon, pal: Palette, active: bool) -> egu
             ui.painter().circle_stroke(c, 8.0, stroke);
             ui.painter()
                 .line_segment([c + Vec2::new(0.0, -0.5), c + Vec2::new(0.0, 4.0)], stroke);
-            ui.painter().circle_filled(c + Vec2::new(0.0, -3.6), 1.1, color);
+            ui.painter()
+                .circle_filled(c + Vec2::new(0.0, -3.6), 1.1, color);
         }
     }
     response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn draw_cross(ui: &egui::Ui, c: Pos2, d: f32, stroke: Stroke) {
-    ui.painter().line_segment([c + Vec2::new(-d, -d), c + Vec2::new(d, d)], stroke);
-    ui.painter().line_segment([c + Vec2::new(-d, d), c + Vec2::new(d, -d)], stroke);
+    ui.painter()
+        .line_segment([c + Vec2::new(-d, -d), c + Vec2::new(d, d)], stroke);
+    ui.painter()
+        .line_segment([c + Vec2::new(-d, d), c + Vec2::new(d, -d)], stroke);
 }
 
 /// `"FixUpX (fxtwitter.com / fixupx.com)"` → `("FixUpX", "fxtwitter.com / fixupx.com")`.
