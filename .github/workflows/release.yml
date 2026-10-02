@@ -8,6 +8,7 @@ jobs:
   build:
     strategy:
       matrix:
+        # The in-app updater (src/update.rs) finds assets by these exact names.
         include:
           - os: ubuntu-latest
             binary: target/release/autofxembed

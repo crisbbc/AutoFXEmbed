@@ -1,14 +1,28 @@
-//! System tray icon with context menu.
+//! System tray icon.
+//!
+//! Left-clicking the icon opens the flyout panel (see [`crate::panel`]);
+//! right-clicking shows a tiny Open / Quit menu as a fallback.
 //!
 //! ## Windows
 //!
 //! Uses raw Win32 shell + user32 APIs to create a tray icon and popup menu.
-//! Menu events arrive via the window message pump in [`crate::monitor`].
+//! Tray events arrive via the window message pump in [`crate::monitor`].
 //!
 //! ## Linux
 //!
-//! Uses `ksni` to expose a pure-Rust D-Bus StatusNotifierItem.
-//! Menu callbacks update shared state read by the monitor loop.
+//! Uses `ksni` to expose a pure-Rust D-Bus StatusNotifierItem. Activation
+//! (left-click) opens the panel; the menu offers Open and Quit.
+//!
+//! The panel is a separate process, so its copy / quit actions reach the
+//! monitor loop through handlers registered with [`crate::panel::set_handlers`].
+
+/// Text of the About message: the running version plus the credit line.
+pub(crate) fn about_text() -> String {
+    format!(
+        "AutoFxEmbed v{}\nMade by Cris with much <3 for his friends",
+        env!("CARGO_PKG_VERSION")
+    )
+}
 
 // ---------------------------------------------------------------------------
 // Windows implementation (Win32)
@@ -24,41 +38,23 @@ use windows_sys::Win32::UI::Shell::{
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, MessageBoxW, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED,
-    MB_ICONINFORMATION, MB_OK, MF_CHECKED, MF_DEFAULT, MF_DISABLED, MF_GRAYED, MF_POPUP,
-    MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN, WM_NULL,
-    WM_RBUTTONUP,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadImageW, PostMessageW,
+    SetForegroundWindow, TrackPopupMenu, HMENU, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, MF_DEFAULT,
+    MF_SEPARATOR, MF_STRING, TPM_LEFTALIGN, TPM_NONOTIFY, TPM_RETURNCMD, TPM_TOPALIGN,
+    WM_LBUTTONUP, WM_NULL, WM_RBUTTONUP,
 };
 
-/// Custom message Windows sends to our window when the tray icon is interacted with.
-/// (WM_APP = 0x8000.)
+/// Custom message Windows sends to our window when the tray icon is interacted
+/// with. (WM_APP = 0x8000.)
 #[cfg(target_os = "windows")]
 pub const TRAY_CALLBACK_MSG: u32 = 0x8001;
 
 /// Menu item IDs (Windows).
 #[cfg(target_os = "windows")]
-const MENU_QUIT: u32 = 1;
+const MENU_OPEN: u32 = 1;
 #[cfg(target_os = "windows")]
-const MENU_STARTUP: u32 = 2;
-#[cfg(target_os = "windows")]
-const MENU_ABOUT: u32 = 3;
-#[cfg(target_os = "windows")]
-const MENU_CLEAR_HISTORY: u32 = 4;
-#[cfg(target_os = "windows")]
-const MENU_ADD_CUSTOM: u32 = 5;
-/// First ID of the custom X target items (`MENU_CUSTOM_BASE + index in the snapshot`).
-#[cfg(target_os = "windows")]
-const MENU_CUSTOM_BASE: u32 = 300;
-/// First ID of the "Remove custom domain" items (same indexing as the custom items).
-#[cfg(target_os = "windows")]
-const MENU_REMOVE_BASE: u32 = 400;
-/// First ID of the Recent items (`MENU_RECENT_BASE + index in the snapshot`).
-#[cfg(target_os = "windows")]
-const MENU_RECENT_BASE: u32 = 200;
-/// First ID of the X / Twitter target items (`MENU_X_BASE + index in XTarget::ALL`).
-#[cfg(target_os = "windows")]
-const MENU_X_BASE: u32 = 100;
+const MENU_QUIT: u32 = 2;
+
 
 /// Owned popup menu handle; destroyed on drop (which also frees any submenu
 /// that was successfully attached to it).
@@ -79,17 +75,6 @@ impl Menu {
 
     unsafe fn separator(&self) -> bool {
         AppendMenuW(self.0, MF_SEPARATOR, 0, std::ptr::null()) != 0
-    }
-
-    /// Attach `sub` as a popup. On success `self` owns it; on failure `sub`
-    /// is dropped (destroyed) here.
-    unsafe fn append_submenu(&self, sub: Menu, text: &str) -> bool {
-        if self.append(MF_STRING | MF_POPUP, sub.0 as usize, text) {
-            std::mem::forget(sub);
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -145,14 +130,14 @@ pub unsafe fn remove(hwnd: HWND) {
 }
 
 /// Handle a tray callback message. `lparam`'s low word is the mouse event.
-/// On right-click we show the startup, About, and Quit menu items.
+/// Left-click toggles the panel; right-click shows the Open / Quit menu.
 ///
 /// # Safety
 /// Calls Win32 menu/user32 APIs.
 #[cfg(target_os = "windows")]
 pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     let mouse_msg = (lparam as u32) & 0xFFFF;
-    if mouse_msg != WM_RBUTTONUP {
+    if mouse_msg != WM_LBUTTONUP && mouse_msg != WM_RBUTTONUP {
         return;
     }
 
@@ -160,124 +145,19 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     if GetCursorPos(&mut pt) == 0 {
         return;
     }
+    let anchor = Some((pt.x as f32, pt.y as f32));
+    if mouse_msg == WM_LBUTTONUP {
+        crate::panel::open_or_toggle(anchor);
+        return;
+    }
 
     let Some(menu) = Menu::popup() else {
         return;
     };
-
-    // X has a configurable submenu; fixed and upcoming providers are informational.
-    let Some(x_submenu) = Menu::popup() else {
-        return;
-    };
-    // Pick up hand edits to custom_domains.txt. The snapshot is kept so a
-    // returned ID maps to the domain that was shown.
-    crate::config::reload_custom();
-    let customs = crate::config::custom_domains();
-    let selection = crate::config::selection();
-    for (index, target) in crate::config::XTarget::ALL.into_iter().enumerate() {
-        let checked = if selection == crate::config::Selection::Builtin(target) {
-            MF_CHECKED
-        } else {
-            0
-        };
-        if !x_submenu.append(
-            MF_STRING | checked,
-            (MENU_X_BASE as usize) + index,
-            target.label(),
-        ) {
-            return;
-        }
-    }
-    if !customs.is_empty() && !x_submenu.separator() {
-        return;
-    }
-    for (index, domain) in customs.iter().enumerate() {
-        let checked = if selection == crate::config::Selection::Custom(domain.clone()) {
-            MF_CHECKED
-        } else {
-            0
-        };
-        if !x_submenu.append(
-            MF_STRING | checked,
-            (MENU_CUSTOM_BASE as usize) + index,
-            domain,
-        ) {
-            return;
-        }
-    }
-    if !x_submenu.separator()
-        || !x_submenu.append(MF_STRING, MENU_ADD_CUSTOM as usize, "Add custom domain...")
-    {
-        return;
-    }
-    if !customs.is_empty() {
-        let Some(remove_submenu) = Menu::popup() else {
-            return;
-        };
-        for (index, domain) in customs.iter().enumerate() {
-            if !remove_submenu.append(MF_STRING, (MENU_REMOVE_BASE as usize) + index, domain) {
-                return;
-            }
-        }
-        if !x_submenu.append_submenu(remove_submenu, "Remove custom domain") {
-            return;
-        }
-    }
-    if !menu.append_submenu(x_submenu, "X / Twitter") {
-        return;
-    }
-    if !menu.append(
-        MF_STRING | MF_GRAYED | MF_DISABLED,
-        0,
-        "TikTok (tnktok.com)",
-    ) || !menu.separator()
-    {
-        return;
-    }
-
-    // Recent conversions. The snapshot is kept so a returned ID maps to the
-    // entry that was shown, even if the history changes while the menu is open.
-    let recent = crate::history::recent(crate::history::MENU_ENTRIES);
-    let Some(recent_submenu) = Menu::popup() else {
-        return;
-    };
-    if recent.is_empty()
-        && !recent_submenu.append(MF_STRING | MF_GRAYED | MF_DISABLED, 0, "(empty)")
-    {
-        return;
-    }
-    for (index, entry) in recent.iter().enumerate() {
-        // `&` marks a mnemonic in Win32 menus; double it to show it literally.
-        let label = crate::history::menu_label(entry).replace('&', "&&");
-        if !recent_submenu.append(MF_STRING, (MENU_RECENT_BASE as usize) + index, &label) {
-            return;
-        }
-    }
-    if !menu.append_submenu(recent_submenu, "Recent")
-        || !menu.append(MF_STRING, MENU_CLEAR_HISTORY as usize, "Clear history")
+    if !menu.append(MF_STRING | MF_DEFAULT, MENU_OPEN as usize, "Open")
         || !menu.separator()
+        || !menu.append(MF_STRING, MENU_QUIT as usize, "Quit")
     {
-        return;
-    }
-
-    // Start on startup (checkable — check reflects current registry state).
-    let startup_flags = MF_STRING
-        | if crate::autostart::is_enabled() {
-            MF_CHECKED
-        } else {
-            0
-        };
-    if !menu.append(startup_flags, MENU_STARTUP as usize, "Start on startup") || !menu.separator() {
-        return;
-    }
-
-    // About (bold — MF_DEFAULT marks it as the default menu item).
-    if !menu.append(MF_STRING | MF_DEFAULT, MENU_ABOUT as usize, "About") || !menu.separator() {
-        return;
-    }
-
-    // Quit.
-    if !menu.append(MF_STRING, MENU_QUIT as usize, "Quit") {
         return;
     }
 
@@ -301,44 +181,14 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     drop(menu);
 
     match cmd as u32 {
-        c if (MENU_X_BASE..MENU_X_BASE + crate::config::XTarget::ALL.len() as u32).contains(&c) => {
-            crate::config::select_builtin(crate::config::XTarget::ALL[(c - MENU_X_BASE) as usize]);
-        }
-        c if (MENU_CUSTOM_BASE..MENU_CUSTOM_BASE + customs.len() as u32).contains(&c) => {
-            crate::config::select_custom(&customs[(c - MENU_CUSTOM_BASE) as usize]);
-        }
-        c if (MENU_REMOVE_BASE..MENU_REMOVE_BASE + customs.len() as u32).contains(&c) => {
-            crate::config::remove_custom(&customs[(c - MENU_REMOVE_BASE) as usize]);
-        }
-        MENU_ADD_CUSTOM => {
-            crate::dialog::add_custom_domain();
-        }
-        c if (MENU_RECENT_BASE..MENU_RECENT_BASE + recent.len() as u32).contains(&c) => {
-            let entry = &recent[(c - MENU_RECENT_BASE) as usize];
-            if !crate::clipboard::write_text(&entry.embed) {
-                eprintln!("AutoFxEmbed: unable to copy history entry");
-            }
-        }
-        MENU_CLEAR_HISTORY => {
-            crate::history::clear();
-        }
-        MENU_STARTUP => {
-            crate::autostart::toggle();
-        }
-        MENU_ABOUT => {
-            MessageBoxW(
-                hwnd,
-                crate::clipboard::wide("Made by Cris with much <3 for his friends").as_ptr(),
-                crate::clipboard::wide("About").as_ptr(),
-                MB_OK | MB_ICONINFORMATION,
-            );
-        }
+        MENU_OPEN => crate::panel::open_or_toggle(anchor),
         MENU_QUIT => {
             windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
         }
         _ => {}
     }
 }
+
 
 // ---------------------------------------------------------------------------
 // Linux implementation (ksni / D-Bus StatusNotifierItem)
@@ -353,21 +203,17 @@ use std::sync::{
 #[cfg(target_os = "linux")]
 use ksni::{
     blocking::{Handle, TrayMethods},
-    menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu},
+    menu::{MenuItem, StandardItem},
     Icon, Tray as KsniTray,
 };
 
 /// Tray data that implements the ksni [`KsniTray`] trait.
-/// The D-Bus menu is rebuilt on every right-click via [`KsniTray::menu`],
-/// so the "Start on startup" checkmark always reflects the live state.
 #[cfg(target_os = "linux")]
 pub struct LinuxTray {
     /// Set to `true` from the Quit menu callback; the monitor loop reads it.
     pub quit_requested: Arc<AtomicBool>,
-    /// Link picked from the Recent submenu; the monitor loop owns the
-    /// clipboard (on Wayland it must stay alive to serve pastes) and copies it.
-    pub copy_request: Arc<Mutex<Option<String>>>,
 }
+
 
 #[cfg(target_os = "linux")]
 impl KsniTray for LinuxTray {
@@ -402,65 +248,24 @@ impl KsniTray for LinuxTray {
         }
     }
 
+    /// Left-click: ksni passes the click position in screen coordinates.
+    fn activate(&mut self, x: i32, y: i32) {
+        crate::panel::open_or_toggle(Some((x as f32, y as f32)));
+    }
+
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let quit = self.quit_requested.clone();
-        let copy_request = self.copy_request.clone();
         vec![
-            SubMenu {
-                label: "X / Twitter".into(),
-                submenu: x_items(),
-                ..Default::default()
-            }
-            .into(),
             StandardItem {
-                label: "TikTok (tnktok.com)".into(),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            SubMenu {
-                label: "Recent".into(),
-                submenu: recent_items(copy_request),
-                ..Default::default()
-            }
-            .into(),
-            StandardItem {
-                label: "Clear history".into(),
-                activate: Box::new(|_tray| {
-                    crate::history::clear();
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            CheckmarkItem {
-                label: "Start on startup".into(),
-                checked: crate::autostart::is_enabled(),
-                activate: Box::new(|_tray| {
-                    crate::autostart::toggle();
-                }),
-                ..Default::default()
-            }
-            .into(),
-            MenuItem::Separator,
-            StandardItem {
-                label: "About".into(),
-                activate: Box::new(|_tray| {
-                    crate::dialog::notify(
-                        "About AutoFxEmbed",
-                        "Made by Cris with much <3 for his friends",
-                    );
-                }),
+                label: "Open".into(),
+                activate: Box::new(|_tray| crate::panel::open_or_toggle(None)),
                 ..Default::default()
             }
             .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
-                activate: Box::new(move |_tray| {
-                    quit.store(true, Ordering::SeqCst);
-                }),
+                activate: Box::new(move |_tray| quit.store(true, Ordering::SeqCst)),
                 ..Default::default()
             }
             .into(),
@@ -468,119 +273,14 @@ impl KsniTray for LinuxTray {
     }
 }
 
-/// Items of the X / Twitter submenu: the built-in targets, the user's custom
-/// domains, and the add / remove entries. Re-reads `custom_domains.txt` first.
-#[cfg(target_os = "linux")]
-fn x_items() -> Vec<MenuItem<LinuxTray>> {
-    use crate::config::{self, Selection, XTarget};
-
-    config::reload_custom();
-    let selection = config::selection();
-    let customs = config::custom_domains();
-    let mark = |selected: bool| if selected { "✓" } else { " " };
-
-    let mut items: Vec<MenuItem<LinuxTray>> = XTarget::ALL
-        .into_iter()
-        .map(|target| {
-            StandardItem {
-                label: format!(
-                    "{} {}",
-                    mark(selection == Selection::Builtin(target)),
-                    target.label()
-                ),
-                activate: Box::new(move |_tray| config::select_builtin(target)),
-                ..Default::default()
-            }
-            .into()
-        })
-        .collect();
-
-    if !customs.is_empty() {
-        items.push(MenuItem::Separator);
-        for domain in &customs {
-            let selected = selection == Selection::Custom(domain.clone());
-            let domain = domain.clone();
-            items.push(
-                StandardItem {
-                    label: format!("{} {domain}", mark(selected)),
-                    activate: Box::new(move |_tray| config::select_custom(&domain)),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-    }
-
-    items.push(MenuItem::Separator);
-    items.push(
-        StandardItem {
-            label: "Add custom domain...".into(),
-            activate: Box::new(|_tray| crate::dialog::add_custom_domain()),
-            ..Default::default()
-        }
-        .into(),
-    );
-    if !customs.is_empty() {
-        items.push(
-            SubMenu {
-                label: "Remove custom domain".into(),
-                submenu: customs
-                    .into_iter()
-                    .map(|domain| {
-                        StandardItem {
-                            label: domain.clone(),
-                            activate: Box::new(move |_tray| config::remove_custom(&domain)),
-                            ..Default::default()
-                        }
-                        .into()
-                    })
-                    .collect(),
-                ..Default::default()
-            }
-            .into(),
-        );
-    }
-    items
-}
-
-/// Items of the Recent submenu: the newest conversions, each copying its embed
-/// link back to the clipboard when clicked.
-#[cfg(target_os = "linux")]
-fn recent_items(copy_request: Arc<Mutex<Option<String>>>) -> Vec<MenuItem<LinuxTray>> {
-    let recent = crate::history::recent(crate::history::MENU_ENTRIES);
-    if recent.is_empty() {
-        return vec![StandardItem {
-            label: "(empty)".into(),
-            enabled: false,
-            ..Default::default()
-        }
-        .into()];
-    }
-    recent
-        .into_iter()
-        .map(|entry| {
-            let copy_request = copy_request.clone();
-            StandardItem {
-                // `_` marks a mnemonic in DBusMenu labels; double it to show it literally.
-                label: crate::history::menu_label(&entry).replace('_', "__"),
-                activate: Box::new(move |_tray| {
-                    if let Ok(mut request) = copy_request.lock() {
-                        *request = Some(entry.embed.clone());
-                    }
-                }),
-                ..Default::default()
-            }
-            .into()
-        })
-        .collect()
-}
-
-/// What [`spawn`] hands back to the monitor loop.
+/// What `spawn` hands back to the monitor loop.
 #[cfg(target_os = "linux")]
 pub struct TrayControl {
     pub handle: Handle<LinuxTray>,
     pub quit: Arc<AtomicBool>,
-    /// Embed link the user picked from the Recent submenu, waiting to be copied.
+    /// Embed link the user picked from the panel's Recent list, waiting to be
+    /// copied. The monitor loop owns the clipboard (on Wayland it must stay
+    /// alive to serve pastes) and copies it.
     pub copy_request: Arc<Mutex<Option<String>>>,
 }
 
@@ -591,23 +291,16 @@ pub fn spawn() -> Result<TrayControl, ksni::Error> {
     let copy_request = Arc::new(Mutex::new(None));
     let tray = LinuxTray {
         quit_requested: quit.clone(),
-        copy_request: copy_request.clone(),
     };
     let handle = tray.spawn()?;
 
-    // Re-render the menu whenever the history or the custom domains change (new
-    // conversion, fetched metadata, clear, domain added / removed). The update
-    // runs on its own thread: `clear` and `remove_custom` are invoked from inside
-    // a tray callback, where a blocking update would deadlock.
-    let refresh = handle.clone();
-    let refresh_menu = move || {
-        let refresh = refresh.clone();
-        std::thread::spawn(move || {
-            refresh.update(|_| {});
-        });
-    };
-    crate::config::set_on_change(refresh_menu.clone());
-    crate::history::set_on_change(refresh_menu);
+    // The panel is another process: route its actions back to this one.
+    let copy_slot = copy_request.clone();
+    let quit_flag = quit.clone();
+    crate::panel::set_handlers(
+        move |embed| *copy_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(embed),
+        move || quit_flag.store(true, Ordering::SeqCst),
+    );
 
     Ok(TrayControl {
         handle,

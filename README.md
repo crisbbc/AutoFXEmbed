@@ -17,8 +17,9 @@
 <p align="center">
   <a href="#install">Install</a> &middot;
   <a href="#usage">Usage</a> &middot;
-  <a href="#tray-menu">Tray menu</a> &middot;
+  <a href="#tray-panel">Tray panel</a> &middot;
   <a href="#history">History</a> &middot;
+  <a href="#updates">Updates</a> &middot;
   <a href="#build">Build</a>
 </p>
 
@@ -49,7 +50,7 @@ works.
 ### Alternative X / Twitter targets
 
 X / Twitter links can go to a different embed host. Pick one from the tray
-icon's **X / Twitter** submenu; the choice is remembered.
+icon's **X / Twitter** section; the choice is remembered.
 
 | Target    | Rewritten to                             |
 |-----------|------------------------------------------|
@@ -68,7 +69,7 @@ icon's **X / Twitter** submenu; the choice is remembered.
 
 ### Your own domain
 
-Know another FxEmbed-style mirror? In the **X / Twitter** submenu, click
+Know another FxEmbed-style mirror? In the **X / Twitter** section, click
 **Add custom domain...** and type it (`myfx.com`, or a full URL; only the host
 is kept). It is selected right away, and `x.com` / `twitter.com` links will be
 rewritten to it. Use **Remove custom domain** to forget one again.
@@ -116,31 +117,50 @@ there, or make sure that directory is on your `PATH`.
 Then copy an X / Twitter, Bluesky or TikTok link and paste it
 anywhere. It is already embed-friendly.
 
-## Tray menu
+## Tray panel
 
-Right-click the tray icon for:
+Left-click the tray icon to open a small flyout next to it. It closes when you click elsewhere or press Esc.
 
-| Item                | What it does                                                      |
-|---------------------|-------------------------------------------------------------------|
-| **X / Twitter**     | Submenu to pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own). The choice is remembered. Also has **Add custom domain...** and **Remove custom domain**. |
-| **TikTok**          | Informational: shows the host it is rewritten to.                 |
-| **Recent**          | The last 10 converted links, labeled with their title and description. Click one to copy its embed link again. |
-| **Clear history**   | Forgets every stored link.                                        |
-| **Start on startup** | Checked when AutoFxEmbed will launch at login. On Windows this toggles a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates `~/.config/autostart/autofxembed.desktop`. |
-| **About**           | A small message box (a desktop notification on Linux).            |
-| **Quit**            | Exits.                                                            |
+- **X / Twitter**: pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own). The choice is remembered. Type a domain and press **Add** to add your own, or click **✕** to remove one.
+- **TikTok**: informational, shows the host it is rewritten to.
+- **Recent**: the last 10 converted links, labeled with their title and description. Click one to copy its embed link again, or **Clear** to forget every stored link.
+- **Start on startup**: checked when AutoFxEmbed will launch at login. On Windows this toggles a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates `~/.config/autostart/autofxembed.desktop`.
+- **Check for updates automatically** and **Check for updates now**: see [Updates](#updates).
+- **Quit AutoFxEmbed**: exits.
+
+Right-click the icon for a minimal **Open** / **Quit** menu, which is also the way in on Linux desktops whose tray never reports left-clicks. On Wayland the compositor decides where the panel appears, so it may not sit next to the icon. On Linux the panel needs the usual graphics libraries (OpenGL/EGL and xkbcommon).
 
 ## History
 
 Every converted link is remembered: the last 100, and copying one again moves
 it to the top. Once a link is converted, its embed page is fetched once in the
-background to read the title and description, so the **Recent** submenu shows
+background to read the title and description, so the **Recent** list shows
 what each link is.
 
-- That fetch is the only network request AutoFxEmbed makes.
+- That fetch and the [update check](#updates) are the only network requests
+  AutoFxEmbed makes.
 - If it fails, for example because the page has no embed data, the entry is
   dropped from the history.
 - The history is stored in `<config dir>/autofxembed/history.json`
+  (`~/.config/autofxembed/` on Linux).
+
+## Updates
+
+AutoFxEmbed checks the [latest GitHub release](https://github.com/crisbbc/AutoFXEmbed/releases/latest)
+shortly after it starts and then once a day. Turn that off with **Check for
+updates automatically** in the tray panel, or check on demand with **Check for
+updates...**.
+
+- When a newer version exists it asks first. On **Yes** it downloads the
+  release binary for your platform, verifies its SHA-256 against the digest
+  GitHub publishes for the asset, replaces the running executable and
+  restarts. A failed check or download changes nothing.
+- Declining an automatic prompt skips that version; the manual check still
+  offers it.
+- If you installed with `cargo install`, the binary isn't swapped under Cargo:
+  you are told to re-run the install command instead.
+- Linux needs `kdialog` or `zenity` for the confirmation prompt.
+- State is stored in `<config dir>/autofxembed/updates.json`
   (`~/.config/autofxembed/` on Linux).
 
 ## How changes are detected

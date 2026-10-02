@@ -300,7 +300,7 @@ fn is_or_under(host: &str, domain: &str) -> bool {
 }
 
 /// True for the embed hosts that already have a built-in target.
-fn is_builtin_domain(domain: &str) -> bool {
+pub fn is_builtin_domain(domain: &str) -> bool {
     XTarget::ALL
         .into_iter()
         .flat_map(|target| target.rules())

@@ -23,6 +23,17 @@ use std::sync::Mutex;
 use crate::clipboard;
 use crate::transform::transform_text_links;
 
+type QuitHook = Box<dyn Fn() + Send + Sync>;
+static QUIT_HOOK: std::sync::OnceLock<QuitHook> = std::sync::OnceLock::new();
+
+/// Ask the running event loop to exit (used by the updater after installing).
+/// Safe to call from any thread; a no-op until the loop has registered itself.
+pub fn request_quit() {
+    if let Some(hook) = QUIT_HOOK.get() {
+        hook();
+    }
+}
+
 /// Handoff between the clipboard-update handler and the deferred writer
 /// (Windows only — on Linux we write directly from the poll callback).
 #[cfg(target_os = "windows")]
@@ -56,6 +67,9 @@ mod win {
     /// Custom message: perform the deferred clipboard write.
     /// (WM_APP is 0x8000; we use 0x8002 to leave room for the tray callback at 0x8001.)
     const WM_DO_WRITE: u32 = 0x8002;
+    /// Custom message: leave the message loop (posted by `request_quit` from other threads,
+    /// since `PostQuitMessage` only affects the calling thread's queue).
+    const WM_APP_QUIT: u32 = 0x8003;
 
     /// `HWND` is `*mut c_void`, which isn't `Send`. Store it as `usize`
     /// (trivially `Send`) and cast back when posting — we never dereference it.
@@ -125,6 +139,11 @@ mod win {
                 return;
             }
 
+            let quit_target = SendHwnd::new(hwnd);
+            let _ = QUIT_HOOK.set(Box::new(move || {
+                quit_target.post_message(WM_APP_QUIT, 0, 0);
+            }));
+
             let mut msg: MSG = std::mem::zeroed();
             let message_result = loop {
                 let result = GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0);
@@ -158,6 +177,10 @@ mod win {
                 }
                 WM_DO_WRITE => {
                     do_pending_write_win(hwnd);
+                    0
+                }
+                WM_APP_QUIT => {
+                    PostQuitMessage(0);
                     0
                 }
                 crate::tray::TRAY_CALLBACK_MSG => {
@@ -549,6 +572,11 @@ mod linux_impl {
             }
         };
 
+        let quit_for_updates = Arc::clone(&quit_flag);
+        let _ = QUIT_HOOK.set(Box::new(move || {
+            quit_for_updates.store(true, Ordering::SeqCst);
+        }));
+
         // On Wayland clipboard data is hosted by the application, so we must
         // keep a single persistent Clipboard instance alive — otherwise any
         // text we write disappears before another app can paste it.
@@ -812,6 +840,8 @@ pub fn run() {
     };
     crate::config::load();
     crate::history::load();
+    crate::update::load();
+    crate::update::start();
     #[cfg(target_os = "windows")]
     win::run();
 
@@ -821,5 +851,14 @@ pub fn run() {
     #[cfg(not(any(target_os = "windows", target_os = "linux")))]
     {
         eprintln!("AutoFxEmbed: unsupported platform");
+    }
+
+    // After an update: release the single-instance lock, then launch the new
+    // binary (the tray is already torn down, so it can't collide with us).
+    drop(_single_instance);
+    if let Some(exe) = crate::update::restart_target() {
+        if let Err(error) = std::process::Command::new(&exe).spawn() {
+            eprintln!("AutoFxEmbed: unable to restart {exe:?}: {error}");
+        }
     }
 }
