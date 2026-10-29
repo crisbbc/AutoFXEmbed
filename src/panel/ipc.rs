@@ -32,6 +32,7 @@ pub struct PanelState {
     pub recent: Vec<history::Entry>,
     pub startup: bool,
     pub auto_update: bool,
+    pub strip_trackers: bool,
 }
 
 impl PanelState {
@@ -54,6 +55,7 @@ impl PanelState {
             recent: history::recent(history::MENU_ENTRIES),
             startup: autostart::is_enabled(),
             auto_update: update::auto_enabled(),
+            strip_trackers: config::strip_trackers(),
         }
     }
 }
@@ -67,6 +69,7 @@ pub enum Action {
     RemoveCustom(String),
     CopyRecent(String),
     ClearHistory,
+    ToggleTrackers,
     ToggleStartup,
     ToggleAutoUpdate,
     CheckUpdate,
@@ -111,6 +114,7 @@ fn dispatch(action: Action) {
             }
         },
         Action::ClearHistory => history::clear(),
+        Action::ToggleTrackers => config::toggle_strip_trackers(),
         Action::ToggleStartup => {
             autostart::toggle();
         }

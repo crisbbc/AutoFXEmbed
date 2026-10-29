@@ -1,0 +1,15 @@
+[package]
+name = "autofxembed-android"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.89"
+description = "JNI bridge exposing autofxembed-core to the Android app"
+publish = false
+
+[lib]
+name = "autofxembed"
+crate-type = ["cdylib"]
+
+[dependencies]
+autofxembed-core = { path = "../../core" }
+jni = "0.22"

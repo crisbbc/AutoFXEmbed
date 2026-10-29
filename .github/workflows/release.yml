@@ -31,8 +31,57 @@ jobs:
         with:
           name: ${{ matrix.asset }}
           path: dist/${{ matrix.asset }}
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      # Without the signing key, skip Android rather than failing the release.
+      - id: key
+        env:
+          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$KEYSTORE" ]; then
+            echo "::warning::ANDROID_KEYSTORE_BASE64 is not set; skipping the Android APK"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "$KEYSTORE" | base64 -d > "$RUNNER_TEMP/release.jks"
+          fi
+      - if: steps.key.outputs.skip != 'true'
+        uses: actions/checkout@v5
+      - if: steps.key.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android, armv7-linux-androideabi, x86_64-linux-android
+      - if: steps.key.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+      - if: steps.key.outputs.skip != 'true'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - if: steps.key.outputs.skip != 'true'
+        run: |
+          cargo install cargo-ndk --locked
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager "ndk;30.0.16248370"
+      - if: steps.key.outputs.skip != 'true'
+        working-directory: android
+        env:
+          ANDROID_KEYSTORE: ${{ runner.temp }}/release.jks
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --console=plain
+      # The in-app updater (Updater.java) finds the APK by this exact name.
+      - if: steps.key.outputs.skip != 'true'
+        run: |
+          mkdir dist
+          cp android/app/build/outputs/apk/release/app-release.apk dist/autofxembed-android.apk
+      - if: steps.key.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: autofxembed-android.apk
+          path: dist/autofxembed-android.apk
   publish:
-    needs: build
+    needs: [build, android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

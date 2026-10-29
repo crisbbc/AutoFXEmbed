@@ -25,9 +25,13 @@ fn transforms_bsky_https() {
 }
 
 #[test]
-fn leaves_instagram_untouched() {
+fn only_cleans_instagram() {
     assert_eq!(
         transform_clipboard("https://www.instagram.com/reel/ABC123/?utm_source=ig_web_copy_link"),
+        Some("https://www.instagram.com/reel/ABC123/".to_string())
+    );
+    assert_eq!(
+        transform_clipboard("https://www.instagram.com/reel/ABC123/"),
         None
     );
 }
@@ -36,7 +40,7 @@ fn leaves_instagram_untouched() {
 fn transforms_tiktok_https() {
     assert_eq!(
         transform_clipboard("https://www.tiktok.com/@creator/video/123456789?is_from_webapp=1"),
-        Some("https://www.tnktok.com/@creator/video/123456789?is_from_webapp=1".to_string())
+        Some("https://www.tnktok.com/@creator/video/123456789".to_string())
     );
 }
 
@@ -99,8 +103,8 @@ fn transforms_url_with_user_info_and_port() {
 #[test]
 fn preserves_query_and_fragment() {
     assert_eq!(
-        transform_clipboard("https://twitter.com/foo?s=123&t=abc#ref"),
-        Some("https://fxtwitter.com/foo?s=123&t=abc#ref".to_string())
+        transform_clipboard("https://twitter.com/foo?lang=en&s=123#ref"),
+        Some("https://fxtwitter.com/foo?lang=en#ref".to_string())
     );
 }
 

@@ -324,6 +324,15 @@ impl App {
     fn settings(&mut self, ui: &mut egui::Ui, pal: Palette) {
         section_title(ui, pal, "Settings");
         card(ui, pal, |ui| {
+            if switch_row(
+                ui,
+                pal,
+                "Remove link trackers",
+                &mut self.state.strip_trackers,
+            ) {
+                self.send(&Action::ToggleTrackers);
+            }
+            divider(ui, pal);
             if switch_row(ui, pal, "Start on startup", &mut self.state.startup) {
                 self.send(&Action::ToggleStartup);
             }

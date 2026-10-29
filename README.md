@@ -20,6 +20,7 @@
   <a href="#tray-panel">Tray panel</a> &middot;
   <a href="#history">History</a> &middot;
   <a href="#updates">Updates</a> &middot;
+  <a href="#android">Android</a> &middot;
   <a href="#build">Build</a>
 </p>
 
@@ -42,10 +43,30 @@ works.
 | TikTok        | `tiktok.com`    | `tnktok.com`     |
 
 - Everything else in the URL is preserved: subdomain, port, path, query and
-  fragment. The clipboard is updated in place.
+  fragment, minus [tracking parameters](#link-trackers). The clipboard is
+  updated in place.
 - Links embedded in prose are rewritten too, including ones wrapped in
   brackets or quotes, like `(https://x.com/...)`.
 - Already-converted links and unrelated URLs are left untouched.
+
+### Link trackers
+
+Tracking parameters are removed from copied links, both from the links above
+and from any other `http(s)` link, so `https://example.com/page?utm_source=x`
+becomes `https://example.com/page`. Turn it off with **Remove link trackers**
+in the tray panel.
+
+- Removed everywhere: `utm_*`, `fbclid`, `gclid`, `gclsrc`, `dclid`, `gbraid`,
+  `wbraid`, `msclkid`, `twclid`, `ttclid`, `yclid`, `mc_cid`, `mc_eid`,
+  `_hsenc`, `_hsmi`, `mkt_tok`, `igshid`, `igsh`.
+- X / Twitter post links lose their whole query (`?s=`, `?t=`, `?a=`, ...),
+  also when they are already on an embed host such as `fixupx.com`. Other X
+  links lose `s`, `t`, `a`, `ref_src` and `ref_url`.
+- Removed only on their own site: TikTok's share parameters such as
+  `is_from_webapp` and `sender_device`; `si`, `pp`, `feature` (YouTube); `si`, `nd` (Spotify); `img_index` (Instagram);
+  `share_id`, `rdt`, `ref_source` (Reddit).
+- Links that were only cleaned are not added to the [history](#history).
+- The setting is stored in `<config dir>/autofxembed/strip_trackers`.
 
 ### Alternative X / Twitter targets
 
@@ -124,6 +145,7 @@ Left-click the tray icon to open a small flyout next to it. It closes when you c
 - **X / Twitter**: pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own). The choice is remembered. Type a domain and press **Add** to add your own, or click **✕** to remove one.
 - **TikTok**: informational, shows the host it is rewritten to.
 - **Recent**: the last 10 converted links, labeled with their title and description. Click one to copy its embed link again, or **Clear** to forget every stored link.
+- **Remove link trackers**: see [Link trackers](#link-trackers).
 - **Start on startup**: checked when AutoFxEmbed will launch at login. On Windows this toggles a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates `~/.config/autostart/autofxembed.desktop`.
 - **Check for updates automatically** and **Check for updates now**: see [Updates](#updates).
 - **Quit AutoFxEmbed**: exits.
@@ -163,6 +185,69 @@ updates...**.
 - State is stored in `<config dir>/autofxembed/updates.json`
   (`~/.config/autofxembed/` on Linux).
 
+## Android
+
+Android doesn't let background apps watch the clipboard, so on Android you
+share links to the app instead. Share a link from X, Bluesky, TikTok, a
+browser or any other app, pick **Copy embed link**, and the converted text is
+copied to your clipboard. Shared text with links in it works too.
+
+The app's screen has the same settings as the desktop panel:
+
+- **X / Twitter**: pick a built-in target, or type your own domain and tap
+  **Add**. Tap **✕** to remove one.
+- **Remove link trackers**: see [Link trackers](#link-trackers).
+- **Recent**: the last 10 converted links with their title and description.
+  Tap one to copy it again, or **Clear** to forget them. The embed page is read
+  once, as on the desktop. A link whose page isn't an embed is dropped; one
+  that couldn't be read because you were offline is tried again the next time
+  you open the app.
+- **Updates**: checked against the latest GitHub release when you open the
+  app, at most once a day, or with **Check for updates now**. The APK is
+  verified against GitHub's SHA-256 digest before Android's installer asks
+  you to confirm. The first time, Android also asks you to allow installs from
+  AutoFxEmbed.
+
+Grab `autofxembed-android.apk` from the
+[latest release](https://github.com/crisbbc/AutoFXEmbed/releases/latest).
+Minimum Android version: 7.0. It uses the same code as the desktop app for
+rewriting, domain checks, embed data and version comparison (the `core`
+crate, called through JNI from `android/rust`).
+
+### Building the APK
+
+You need the Android SDK with NDK `30.0.16248370`, JDK 17,
+[`cargo-ndk`](https://github.com/bbqsrc/cargo-ndk) and the Android Rust targets:
+
+```bash
+rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
+cargo install cargo-ndk --locked
+cd android
+./gradlew assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
+```
+
+Gradle runs `cargo ndk` itself. Point it at the SDK with `ANDROID_HOME` or
+`android/local.properties` (`sdk.dir=...`). The app version is read from the
+root `Cargo.toml`.
+
+### Signing releases
+
+Android only installs an update signed with the same key as the installed
+app, so release APKs are signed with one long-lived key. Create it once and
+keep a backup: if it is lost, users have to uninstall and reinstall.
+
+```bash
+keytool -genkeypair -v -keystore autofxembed-release.jks -alias autofxembed \
+  -keyalg RSA -keysize 4096 -validity 10000
+base64 -w0 autofxembed-release.jks   # value of ANDROID_KEYSTORE_BASE64
+```
+
+Add these repository secrets: `ANDROID_KEYSTORE_BASE64`,
+`ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`autofxembed`) and
+`ANDROID_KEY_PASSWORD`. Without them the release workflow skips the APK. Debug
+builds use a different key, so switching between a debug build and a release
+build needs an uninstall.
+
 ## How changes are detected
 
 Detection is event-driven wherever possible:
@@ -192,10 +277,10 @@ extension.
 ## Development
 
 ```bash
-cargo fmt -- --check
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-Unit tests cover the pure URL-rewrite logic; platform integration is tested
-manually.
+Unit tests cover the pure URL-rewrite logic (in `core/`); platform
+integration is tested manually.

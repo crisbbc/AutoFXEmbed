@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Embed data for the Recent list, and update checks. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Self-updates through the system installer (the user confirms each one). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Invisible: rewrites the shared text, copies it and closes. -->
+        <activity
+            android:name=".ShareActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:label="@string/share_label"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

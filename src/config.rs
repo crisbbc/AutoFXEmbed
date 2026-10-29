@@ -4,72 +4,13 @@
 //! - `x_target`: the selection, a built-in id ("fixup" | "boypussyx" | "mpregx" |
 //!   "yaoisex" | "faggotx") or `custom:<domain>`.
 //! - `custom_domains.txt`: the user's own embed hosts, one domain per line.
+//! - `strip_trackers`: `0` when tracking parameters should be kept in links.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-/// Which embed host X/Twitter links are rewritten to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum XTarget {
-    /// FixUpX (`fxtwitter.com` / `fixupx.com`).
-    FixUp = 0,
-    /// BoyPussyX (`boypussyx.com`).
-    BoyPussyX = 1,
-    /// MpregX (`mpregx.com`).
-    MpregX = 2,
-    /// YaoiSex (`yaoisex.com`).
-    YaoiSex = 3,
-    /// FaggotX (`faggotx.com`).
-    FaggotX = 4,
-}
-
-impl XTarget {
-    /// Every target, in discriminant order (`ALL[t as usize] == t`).
-    pub const ALL: [XTarget; 5] = [
-        XTarget::FixUp,
-        XTarget::BoyPussyX,
-        XTarget::MpregX,
-        XTarget::YaoiSex,
-        XTarget::FaggotX,
-    ];
-
-    /// Stable identifier persisted in the config file.
-    pub fn id(self) -> &'static str {
-        match self {
-            XTarget::FixUp => "fixup",
-            XTarget::BoyPussyX => "boypussyx",
-            XTarget::MpregX => "mpregx",
-            XTarget::YaoiSex => "yaoisex",
-            XTarget::FaggotX => "faggotx",
-        }
-    }
-
-    /// Human-readable tray menu label.
-    pub fn label(self) -> &'static str {
-        match self {
-            XTarget::FixUp => "FixUpX (fxtwitter / fixupx)",
-            XTarget::BoyPussyX => "BoyPussyX (boypussyx.com)",
-            XTarget::MpregX => "MpregX (mpregx.com)",
-            XTarget::YaoiSex => "YaoiSex (yaoisex.com)",
-            XTarget::FaggotX => "FaggotX (faggotx.com)",
-        }
-    }
-
-    /// X/Twitter host rewrite rules for this target.
-    pub fn rules(self) -> &'static [(&'static str, &'static str)] {
-        match self {
-            XTarget::FixUp => crate::transform::FIXUP_RULES,
-            XTarget::BoyPussyX => crate::transform::BOY_RULES,
-            XTarget::MpregX => crate::transform::MPREG_RULES,
-            XTarget::YaoiSex => crate::transform::YAOI_RULES,
-            XTarget::FaggotX => crate::transform::FAGGOT_RULES,
-        }
-    }
-
-    fn from_id(s: &str) -> Option<XTarget> {
-        Self::ALL.into_iter().find(|target| target.id() == s)
-    }
-}
+pub use autofxembed_core::{is_builtin_domain, normalize_domain, XTarget};
 
 /// What X/Twitter links are currently rewritten to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -102,6 +43,7 @@ impl Selection {
 
 static SELECTION: RwLock<Selection> = RwLock::new(Selection::Builtin(XTarget::FixUp));
 static CUSTOM: RwLock<Vec<String>> = RwLock::new(Vec::new());
+static STRIP_TRACKERS: AtomicBool = AtomicBool::new(true);
 type ChangeHook = Box<dyn Fn() + Send + Sync>;
 static ON_CHANGE: OnceLock<ChangeHook> = OnceLock::new();
 
@@ -143,7 +85,22 @@ pub fn selection() -> Selection {
 pub fn with_x_rules<R>(f: impl FnOnce(&[(&str, &str)]) -> R) -> R {
     match &*read(&SELECTION) {
         Selection::Builtin(target) => f(target.rules()),
-        Selection::Custom(domain) => f(&[("twitter.com", domain), ("x.com", domain)]),
+        Selection::Custom(domain) => f(&autofxembed_core::custom_rules(domain)),
+    }
+}
+
+/// Whether tracking parameters are removed from copied links (on by default).
+pub fn strip_trackers() -> bool {
+    STRIP_TRACKERS.load(Ordering::Relaxed)
+}
+
+pub fn toggle_strip_trackers() {
+    let on = !STRIP_TRACKERS.fetch_xor(true, Ordering::Relaxed);
+    let Some(path) = config_file("strip_trackers") else {
+        return;
+    };
+    if let Err(error) = write_atomic(&path, if on { "1" } else { "0" }) {
+        eprintln!("AutoFxEmbed: unable to save tracker setting: {error}");
     }
 }
 
@@ -230,6 +187,11 @@ pub fn reload_custom() {
 /// and no custom domains.
 pub fn load() {
     reload_custom();
+    if let Some(path) = config_file("strip_trackers") {
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            STRIP_TRACKERS.store(text.trim() != "0", Ordering::Relaxed);
+        }
+    }
     let Some(path) = config_file("x_target") else {
         eprintln!("AutoFxEmbed: no config_dir");
         return;
@@ -294,112 +256,9 @@ fn parse_custom(text: &str) -> Vec<String> {
     domains
 }
 
-/// True if `host` is `domain` or a subdomain of it.
-fn is_or_under(host: &str, domain: &str) -> bool {
-    host == domain || host.strip_suffix(domain).is_some_and(|p| p.ends_with('.'))
-}
-
-/// True for the embed hosts that already have a built-in target.
-pub fn is_builtin_domain(domain: &str) -> bool {
-    XTarget::ALL
-        .into_iter()
-        .flat_map(|target| target.rules())
-        .any(|&(_, replacement)| replacement == domain)
-}
-
-/// Turn what a user typed (`https://MyFx.com/path`) into a bare lowercase
-/// domain (`myfx.com`), or explain why it can't be used as an embed host.
-pub fn normalize_domain(input: &str) -> Result<String, &'static str> {
-    let mut text = input.trim().to_ascii_lowercase();
-    for scheme in ["https://", "http://"] {
-        if let Some(rest) = text.strip_prefix(scheme) {
-            text = rest.to_string();
-            break;
-        }
-    }
-    text.truncate(text.find(['/', '?', '#', ':']).unwrap_or(text.len()));
-    let domain = text.trim_end_matches('.');
-
-    if domain.is_empty() {
-        return Err("Enter a domain such as example.com");
-    }
-    if domain.len() > 253 || !domain.contains('.') {
-        return Err("That doesn't look like a domain name");
-    }
-    let valid_label = |label: &str| {
-        !label.is_empty()
-            && label.len() <= 63
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
-    };
-    if !domain.split('.').all(valid_label) {
-        return Err("That doesn't look like a domain name");
-    }
-    // The embed host must not itself be rewritten, or links would loop.
-    if is_or_under(domain, "x.com") || is_or_under(domain, "twitter.com") {
-        return Err("That domain would be rewritten again");
-    }
-    Ok(domain.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn all_is_in_discriminant_order() {
-        for (index, target) in XTarget::ALL.into_iter().enumerate() {
-            assert_eq!(target as usize, index);
-            assert_eq!(XTarget::from_id(target.id()), Some(target));
-        }
-    }
-
-    #[test]
-    fn normalizes_what_users_type() {
-        for (input, expected) in [
-            ("MyFx.COM", "myfx.com"),
-            ("  https://myfx.com/path?q=1  ", "myfx.com"),
-            ("http://sub.myfx.com:8080/", "sub.myfx.com"),
-            ("myfx.com.", "myfx.com"),
-            ("my-fx2.example.org", "my-fx2.example.org"),
-        ] {
-            assert_eq!(normalize_domain(input).as_deref(), Ok(expected), "{input}");
-        }
-    }
-
-    #[test]
-    fn rejects_unusable_domains() {
-        for input in [
-            "",
-            "   ",
-            "myfx",
-            "x.com",
-            "https://twitter.com/foo",
-            "fx.twitter.com",
-            "bad_domain.com",
-            "-a.com",
-            "a-.com",
-            "a..com",
-            "user@myfx.com",
-            "myfx .com",
-            "ünï.com",
-        ] {
-            assert!(normalize_domain(input).is_err(), "{input:?} should fail");
-        }
-        // A look-alike that merely ends in the same letters is fine.
-        assert_eq!(normalize_domain("myx.com").as_deref(), Ok("myx.com"));
-    }
-
-    #[test]
-    fn builtin_hosts_are_not_custom() {
-        for domain in ["fxtwitter.com", "fixupx.com", "mpregx.com", "faggotx.com"] {
-            assert!(is_builtin_domain(domain), "{domain}");
-        }
-        assert!(!is_builtin_domain("myfx.com"));
-    }
 
     #[test]
     fn selection_ids_round_trip() {

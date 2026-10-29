@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AutoFxEmbed</string>
+    <string name="share_label">Copy embed link</string>
+    <string name="intro">Share a link from X / Twitter, Bluesky, TikTok or any other app to <b>Copy embed link</b>. The embed-friendly version is copied to your clipboard, ready to paste.</string>
+
+    <string name="x_target">X / Twitter links go to</string>
+    <string name="domain_hint">Your own domain, e.g. myfx.com</string>
+    <string name="add">Add</string>
+    <string name="remove_domain">Remove %1$s</string>
+    <string name="target_warning">Some alternative domains have names that may be offensive or NSFW. They, and any domain you add, are third-party services this app does not own or control.</string>
+
+    <string name="settings">Settings</string>
+    <string name="strip_trackers">Remove link trackers</string>
+    <string name="strip_trackers_summary">Drops tracking parameters such as utm_source, fbclid and X\'s share codes from every shared link.</string>
+
+    <string name="recent">Recent</string>
+    <string name="clear">Clear</string>
+    <string name="recent_empty">Links you convert show up here. Tap one to copy it again.</string>
+    <string name="copy_link">Copy %1$s</string>
+
+    <string name="updates">Updates</string>
+    <string name="auto_update">Check for updates automatically</string>
+    <string name="check_now">Check for updates now</string>
+    <string name="checking">Checking for updates…</string>
+    <string name="version">AutoFxEmbed v%1$s</string>
+    <string name="up_to_date">You\'re up to date (v%1$s).</string>
+    <string name="update_title">AutoFxEmbed update</string>
+    <string name="update_question">Version %1$s is available (you have v%2$s). Download and install it now?</string>
+    <string name="update_manual">Version %1$s is available, but it can\'t be installed from here. Get it from the release page.</string>
+    <string name="update_install">Install</string>
+    <string name="update_later">Not now</string>
+    <string name="update_release_page">Release page</string>
+    <string name="update_downloading">Downloading the update…</string>
+    <string name="update_failed">Update failed: %1$s</string>
+    <string name="update_failed_check">Could not reach GitHub. Try again later.</string>
+
+    <string name="copied">Embed link copied</string>
+    <string name="nothing_to_do">No supported link to convert</string>
+</resources>
