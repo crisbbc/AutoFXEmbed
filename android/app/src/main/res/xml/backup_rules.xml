@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- Keep converted link history local; back up preferences only. -->
+    <exclude domain="file" path="history.json" />
+    <exclude domain="file" path="history.json.tmp" />
+</full-backup-content>

@@ -14,13 +14,27 @@ final class Native {
      * {@code null} when nothing changed, else {@code [newText, original0,
      * embed0, original1, embed1, ...]} for the links rewritten to an embed host.
      */
-    static native String[] transform(String text, String selection, boolean stripTrackers);
+    static native String[] transform(
+            String text,
+            String selection,
+            boolean stripTrackers,
+            boolean rewriteX,
+            boolean rewriteBsky,
+            boolean rewriteTiktok,
+            String translateLang,
+            String extraRules);
 
     /** Built-in X / Twitter targets as {@code [id0, label0, id1, label1, ...]}. */
     static native String[] targets();
 
     /** {@code [domain, null]} for a usable custom embed domain, else {@code [null, reason]}. */
     static native String[] normalizeDomain(String input);
+
+    /** {@code [source, target, null]} for a usable site rule, else {@code [null, null, reason]}. */
+    static native String[] normalizeSiteRule(String source, String target);
+
+    /** {@code [langOrEmpty, null]} for a usable language code, else {@code [null, reason]}. */
+    static native String[] normalizeLang(String input);
 
     /**
      * Embed data of a fetched page as {@code [site, title, description, image]},

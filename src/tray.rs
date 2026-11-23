@@ -1,7 +1,7 @@
 //! System tray icon.
 //!
 //! Left-clicking the icon opens the flyout panel (see [`crate::panel`]);
-//! right-clicking shows a tiny Open / Quit menu as a fallback.
+//! right-clicking shows a minimal Open / Pause / Quit menu.
 //!
 //! ## Windows
 //!
@@ -11,10 +11,7 @@
 //! ## Linux
 //!
 //! Uses `ksni` to expose a pure-Rust D-Bus StatusNotifierItem. Activation
-//! (left-click) opens the panel; the menu offers Open and Quit.
-//!
-//! The panel is a separate process, so its copy / quit actions reach the
-//! monitor loop through handlers registered with [`crate::panel::set_handlers`].
+//! (left-click) opens the panel; the menu offers Open, Pause/Resume, and Quit.
 
 /// Text of the About message: the running version plus the credit line.
 pub(crate) fn about_text() -> String {
@@ -24,17 +21,32 @@ pub(crate) fn about_text() -> String {
     )
 }
 
+/// Refresh the tray tooltip/icon/menu (e.g. after toggling Pause).
+pub fn refresh() {
+    #[cfg(target_os = "windows")]
+    refresh_windows();
+    #[cfg(target_os = "linux")]
+    refresh_linux();
+}
+
 // ---------------------------------------------------------------------------
 // Windows implementation (Win32)
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(target_os = "windows")]
 use windows_sys::Win32::Foundation::{HWND, LPARAM, POINT};
+#[cfg(target_os = "windows")]
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+    NOTIFYICONDATAW,
 };
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -53,10 +65,14 @@ pub const TRAY_CALLBACK_MSG: u32 = 0x8001;
 #[cfg(target_os = "windows")]
 const MENU_OPEN: u32 = 1;
 #[cfg(target_os = "windows")]
-const MENU_QUIT: u32 = 2;
+const MENU_PAUSE: u32 = 2;
+#[cfg(target_os = "windows")]
+const MENU_QUIT: u32 = 3;
 
-/// Owned popup menu handle; destroyed on drop (which also frees any submenu
-/// that was successfully attached to it).
+#[cfg(target_os = "windows")]
+static TRAY_HWND: AtomicUsize = AtomicUsize::new(0);
+
+/// Owned popup menu handle; destroyed on drop.
 #[cfg(target_os = "windows")]
 struct Menu(HMENU);
 
@@ -86,11 +102,21 @@ impl Drop for Menu {
     }
 }
 
+#[cfg(target_os = "windows")]
+fn tooltip_text() -> &'static str {
+    if crate::config::is_paused() {
+        "AutoFxEmbed (Paused)"
+    } else {
+        "AutoFxEmbed"
+    }
+}
+
 /// # Safety
 /// Calls Win32 shell + user32 APIs.
 #[cfg(target_os = "windows")]
 pub unsafe fn add(hwnd: HWND) -> bool {
-    let tip = crate::clipboard::wide("AutoFxEmbed");
+    TRAY_HWND.store(hwnd as usize, Ordering::Relaxed);
+    let tip = crate::clipboard::wide(tooltip_text());
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
@@ -115,10 +141,30 @@ pub unsafe fn add(hwnd: HWND) -> bool {
     Shell_NotifyIconW(NIM_ADD, &nid) != 0
 }
 
+#[cfg(target_os = "windows")]
+fn refresh_windows() {
+    let hwnd = TRAY_HWND.load(Ordering::Relaxed) as HWND;
+    if hwnd.is_null() {
+        return;
+    }
+    unsafe {
+        let tip = crate::clipboard::wide(tooltip_text());
+        let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
+        nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
+        nid.hWnd = hwnd;
+        nid.uID = 1;
+        nid.uFlags = NIF_TIP;
+        let n = tip.len().min(nid.szTip.len().saturating_sub(1));
+        nid.szTip[..n].copy_from_slice(&tip[..n]);
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    }
+}
+
 /// # Safety
 /// Calls Win32 shell API.
 #[cfg(target_os = "windows")]
 pub unsafe fn remove(hwnd: HWND) {
+    TRAY_HWND.store(0, Ordering::Relaxed);
     let mut nid: NOTIFYICONDATAW = std::mem::zeroed();
     nid.cbSize = std::mem::size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
@@ -128,8 +174,25 @@ pub unsafe fn remove(hwnd: HWND) {
     }
 }
 
+/// Work area `(left, top, right, bottom)` in screen pixels of the monitor
+/// containing `pt`, so the flyout stays on the clicked monitor in multi-monitor setups.
+#[cfg(target_os = "windows")]
+unsafe fn work_area_for_point(pt: POINT) -> Option<(f32, f32, f32, f32)> {
+    let monitor = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    if monitor.is_null() {
+        return None;
+    }
+    let mut info: MONITORINFO = std::mem::zeroed();
+    info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(monitor, &mut info) == 0 {
+        return None;
+    }
+    let r = info.rcWork;
+    Some((r.left as f32, r.top as f32, r.right as f32, r.bottom as f32))
+}
+
 /// Handle a tray callback message. `lparam`'s low word is the mouse event.
-/// Left-click toggles the panel; right-click shows the Open / Quit menu.
+/// Left-click toggles the panel; right-click shows the Open / Pause / Quit menu.
 ///
 /// # Safety
 /// Calls Win32 menu/user32 APIs.
@@ -145,15 +208,22 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
         return;
     }
     let anchor = Some((pt.x as f32, pt.y as f32));
+    let work_area = work_area_for_point(pt);
     if mouse_msg == WM_LBUTTONUP {
-        crate::panel::open_or_toggle(anchor);
+        crate::panel::open_or_toggle(anchor, work_area);
         return;
     }
 
     let Some(menu) = Menu::popup() else {
         return;
     };
+    let pause_label = if crate::config::is_paused() {
+        "Resume"
+    } else {
+        "Pause"
+    };
     if !menu.append(MF_STRING | MF_DEFAULT, MENU_OPEN as usize, "Open")
+        || !menu.append(MF_STRING, MENU_PAUSE as usize, pause_label)
         || !menu.separator()
         || !menu.append(MF_STRING, MENU_QUIT as usize, "Quit")
     {
@@ -180,7 +250,10 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
     drop(menu);
 
     match cmd as u32 {
-        MENU_OPEN => crate::panel::open_or_toggle(anchor),
+        MENU_OPEN => crate::panel::open_or_toggle(anchor, work_area),
+        MENU_PAUSE => {
+            crate::config::toggle_paused();
+        }
         MENU_QUIT => {
             windows_sys::Win32::UI::WindowsAndMessaging::PostQuitMessage(0);
         }
@@ -193,10 +266,7 @@ pub unsafe fn handle_event(hwnd: HWND, lparam: LPARAM) {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, OnceLock};
 
 #[cfg(target_os = "linux")]
 use ksni::{
@@ -205,11 +275,20 @@ use ksni::{
     Icon, Tray as KsniTray,
 };
 
+#[cfg(target_os = "linux")]
+static TRAY_HANDLE: OnceLock<Handle<LinuxTray>> = OnceLock::new();
+
+#[cfg(target_os = "linux")]
+fn refresh_linux() {
+    if let Some(handle) = TRAY_HANDLE.get() {
+        let _ = handle.update(|_| {});
+    }
+}
+
 /// Tray data that implements the ksni [`KsniTray`] trait.
 #[cfg(target_os = "linux")]
 pub struct LinuxTray {
-    /// Set to `true` from the Quit menu callback; the monitor loop reads it.
-    pub quit_requested: Arc<AtomicBool>,
+    quit: Arc<dyn Fn() + Send + Sync>,
 }
 
 #[cfg(target_os = "linux")]
@@ -219,7 +298,11 @@ impl KsniTray for LinuxTray {
     }
 
     fn title(&self) -> String {
-        "AutoFxEmbed".into()
+        if crate::config::is_paused() {
+            "AutoFxEmbed (Paused)".into()
+        } else {
+            "AutoFxEmbed".into()
+        }
     }
 
     fn icon_pixmap(&self) -> Vec<Icon> {
@@ -230,39 +313,73 @@ impl KsniTray for LinuxTray {
         }
         let w = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as i32;
         let h = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as i32;
+        let mut data = bytes[8..].to_vec();
+        // Dim & desaturate the tray icon when paused so status is obvious at a glance.
+        if crate::config::is_paused() {
+            for px in data.as_chunks_mut::<4>().0 {
+                let gray =
+                    ((px[1] as u16 * 77 + px[2] as u16 * 150 + px[3] as u16 * 29) >> 8) as u8;
+                px[0] = (px[0] as u16 * 140 / 255) as u8;
+                px[1] = gray;
+                px[2] = gray;
+                px[3] = gray;
+            }
+        }
         vec![Icon {
             width: w,
             height: h,
-            data: bytes[8..].to_vec(),
+            data,
         }]
     }
 
     fn tool_tip(&self) -> ksni::ToolTip {
+        let paused = crate::config::is_paused();
         ksni::ToolTip {
-            title: "AutoFxEmbed".into(),
-            description: "Auto-rewrite social-media links in the clipboard".into(),
+            title: if paused {
+                "AutoFxEmbed (Paused)".into()
+            } else {
+                "AutoFxEmbed".into()
+            },
+            description: if paused {
+                "Clipboard rewriting is paused".into()
+            } else {
+                "Auto-rewrite social-media links in the clipboard".into()
+            },
             ..Default::default()
         }
     }
 
     /// Left-click: ksni passes the click position in screen coordinates.
     fn activate(&mut self, x: i32, y: i32) {
-        crate::panel::open_or_toggle(Some((x as f32, y as f32)));
+        crate::panel::open_or_toggle(Some((x as f32, y as f32)), None);
     }
 
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let quit = self.quit_requested.clone();
+        let quit = Arc::clone(&self.quit);
+        let pause_label = if crate::config::is_paused() {
+            "Resume"
+        } else {
+            "Pause"
+        };
         vec![
             StandardItem {
                 label: "Open".into(),
-                activate: Box::new(|_tray| crate::panel::open_or_toggle(None)),
+                activate: Box::new(|_tray| crate::panel::open_or_toggle(None, None)),
+                ..Default::default()
+            }
+            .into(),
+            StandardItem {
+                label: pause_label.into(),
+                activate: Box::new(|_tray| {
+                    crate::config::toggle_paused();
+                }),
                 ..Default::default()
             }
             .into(),
             MenuItem::Separator,
             StandardItem {
                 label: "Quit".into(),
-                activate: Box::new(move |_tray| quit.store(true, Ordering::SeqCst)),
+                activate: Box::new(move |_tray| quit()),
                 ..Default::default()
             }
             .into(),
@@ -270,38 +387,21 @@ impl KsniTray for LinuxTray {
     }
 }
 
-/// What `spawn` hands back to the monitor loop.
+/// Spawn the D-Bus tray service and wire panel copy/quit actions straight into
+/// the monitor event loop (zero polling).
 #[cfg(target_os = "linux")]
-pub struct TrayControl {
-    pub handle: Handle<LinuxTray>,
-    pub quit: Arc<AtomicBool>,
-    /// Embed link the user picked from the panel's Recent list, waiting to be
-    /// copied. The monitor loop owns the clipboard (on Wayland it must stay
-    /// alive to serve pastes) and copies it.
-    pub copy_request: Arc<Mutex<Option<String>>>,
-}
-
-/// Spawn the D-Bus tray service.
-#[cfg(target_os = "linux")]
-pub fn spawn() -> Result<TrayControl, ksni::Error> {
-    let quit = Arc::new(AtomicBool::new(false));
-    let copy_request = Arc::new(Mutex::new(None));
+pub fn spawn(
+    on_copy: impl Fn(String) + Send + Sync + 'static,
+    on_quit: impl Fn() + Send + Sync + 'static,
+) -> Result<Handle<LinuxTray>, ksni::Error> {
+    let quit: Arc<dyn Fn() + Send + Sync> = Arc::new(on_quit);
     let tray = LinuxTray {
-        quit_requested: quit.clone(),
+        quit: Arc::clone(&quit),
     };
     let handle = tray.spawn()?;
+    let _ = TRAY_HANDLE.set(handle.clone());
 
-    // The panel is another process: route its actions back to this one.
-    let copy_slot = copy_request.clone();
-    let quit_flag = quit.clone();
-    crate::panel::set_handlers(
-        move |embed| *copy_slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(embed),
-        move || quit_flag.store(true, Ordering::SeqCst),
-    );
+    crate::panel::set_handlers(on_copy, move || quit());
 
-    Ok(TrayControl {
-        handle,
-        quit,
-        copy_request,
-    })
+    Ok(handle)
 }

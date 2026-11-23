@@ -2,12 +2,27 @@
 <resources>
     <string name="app_name">AutoFxEmbed</string>
     <string name="share_label">Copy embed link</string>
-    <string name="intro">Share a link from X / Twitter, Bluesky, TikTok or any other app to <b>Copy embed link</b>. The embed-friendly version is copied to your clipboard, ready to paste.</string>
+    <string name="reshare_label">Share embed link</string>
+    <string name="share_embed_title">Share embed link</string>
+    <string name="intro">Share a link from X / Twitter, Bluesky, TikTok or any other app to <b>Copy embed link</b> or <b>Share embed link</b>, or convert whatever is on your clipboard below.</string>
+    <string name="convert_clipboard">Convert clipboard</string>
+    <string name="clipboard_empty">Clipboard is empty</string>
+
+    <string name="sites">Sites</string>
+    <string name="site_x">X / Twitter</string>
+    <string name="site_bsky">Bluesky (fxbsky.app)</string>
+    <string name="site_tiktok">TikTok (tnktok.com)</string>
+    <string name="rule_source_hint">reddit.com</string>
+    <string name="rule_target_hint">rxddit.com</string>
 
     <string name="x_target">X / Twitter links go to</string>
     <string name="domain_hint">Your own domain, e.g. myfx.com</string>
     <string name="add">Add</string>
+    <string name="save">Save</string>
     <string name="remove_domain">Remove %1$s</string>
+    <string name="translate_hint">Auto-translate X posts (e.g. en)</string>
+    <string name="translate_saved">X auto-translate set to %1$s</string>
+    <string name="translate_disabled">X auto-translate turned off</string>
     <string name="target_warning">Some alternative domains have names that may be offensive or NSFW. They, and any domain you add, are third-party services this app does not own or control.</string>
 
     <string name="settings">Settings</string>
@@ -16,8 +31,12 @@
 
     <string name="recent">Recent</string>
     <string name="clear">Clear</string>
-    <string name="recent_empty">Links you convert show up here. Tap one to copy it again.</string>
+    <string name="recent_empty">Links you convert show up here. Tap to copy, long-press for more options.</string>
     <string name="copy_link">Copy %1$s</string>
+    <string name="recent_action_copy_embed">Copy embed link</string>
+    <string name="recent_action_copy_original">Copy original link</string>
+    <string name="recent_action_share">Share embed link</string>
+    <string name="recent_action_remove">Remove</string>
 
     <string name="updates">Updates</string>
     <string name="auto_update">Check for updates automatically</string>

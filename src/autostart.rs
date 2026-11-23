@@ -286,9 +286,9 @@ fn disable_linux() -> bool {
 #[cfg(target_os = "linux")]
 fn toggle_linux() -> bool {
     if is_enabled_linux() {
-        disable_linux();
-        false
+        let _ = disable_linux();
     } else {
-        enable_linux()
+        let _ = enable_linux();
     }
+    is_enabled_linux()
 }

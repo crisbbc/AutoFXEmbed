@@ -17,12 +17,16 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
+import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Locale;
@@ -30,9 +34,9 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Self-updater: checks the latest GitHub release and, on the user's say-so,
- * downloads the APK, verifies its SHA-256 against the digest GitHub publishes,
- * and hands it to the system installer. Android always asks the user to confirm
- * the install itself.
+ * streams the APK to a cache file while verifying its SHA-256 against the
+ * digest GitHub publishes, then hands it to the system installer. Android
+ * always asks the user to confirm the install itself.
  */
 final class Updater {
     private static final String TAG = "AutoFxEmbed";
@@ -182,11 +186,17 @@ final class Updater {
         toast(context, context.getString(R.string.update_downloading));
         new Thread(() -> {
             String error = null;
+            File apkFile = null;
             try {
-                install(context, fetchApk(release));
+                apkFile = fetchApkToCache(context, release);
+                install(context, apkFile, release.apkSize);
             } catch (IOException | NoSuchAlgorithmException e) {
                 Log.w(TAG, "update failed: " + e);
                 error = e.getMessage();
+            } finally {
+                if (apkFile != null && !apkFile.delete()) {
+                    Log.w(TAG, "unable to delete cached update APK");
+                }
             }
             String failure = error;
             MAIN.post(() -> {
@@ -198,42 +208,68 @@ final class Updater {
         }).start();
     }
 
-    /** The release APK, checked against its size and SHA-256. */
-    private static byte[] fetchApk(Release release) throws IOException, NoSuchAlgorithmException {
+    /** Stream the release APK to a cache file while verifying its size and SHA-256. */
+    private static File fetchApkToCache(Context context, Release release)
+            throws IOException, NoSuchAlgorithmException {
+        if (release.apkUrl == null || !release.apkUrl.startsWith("https://")) {
+            throw new IOException("refusing non-HTTPS download URL");
+        }
         if (release.apkSize <= 0 || release.apkSize > MAX_ASSET_BYTES) {
             throw new IOException("unexpected download size (" + release.apkSize + " bytes)");
         }
+        File outFile = File.createTempFile("autofxembed-update-", ".apk", context.getCacheDir());
         HttpURLConnection connection = open(release.apkUrl, DOWNLOAD_TIMEOUT_MS);
-        byte[] bytes;
-        try (InputStream in = connection.getInputStream()) {
-            bytes = History.readUpTo(in, (int) release.apkSize + 1);
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            long total = 0;
+            byte[] buffer = new byte[8192];
+            try (InputStream raw = connection.getInputStream();
+                    DigestInputStream in = new DigestInputStream(raw, md);
+                    FileOutputStream out = new FileOutputStream(outFile)) {
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    total += read;
+                    if (total > release.apkSize) {
+                        throw new IOException("downloaded size exceeds the release");
+                    }
+                    out.write(buffer, 0, read);
+                }
+            }
+            if (total != release.apkSize) {
+                throw new IOException("downloaded size does not match the release");
+            }
+            StringBuilder hex = new StringBuilder();
+            for (byte b : md.digest()) {
+                hex.append(String.format(Locale.ROOT, "%02x", b));
+            }
+            if (!hex.toString().equals(release.apkSha256)) {
+                throw new IOException("checksum mismatch");
+            }
+            return outFile;
+        } catch (IOException | RuntimeException e) {
+            //noinspection ResultOfMethodCallIgnored
+            outFile.delete();
+            throw e;
         } finally {
             connection.disconnect();
         }
-        if (bytes.length != release.apkSize) {
-            throw new IOException("downloaded size does not match the release");
-        }
-        byte[] hash = MessageDigest.getInstance("SHA-256").digest(bytes);
-        StringBuilder hex = new StringBuilder();
-        for (byte b : hash) {
-            hex.append(String.format(Locale.ROOT, "%02x", b));
-        }
-        if (!hex.toString().equals(release.apkSha256)) {
-            throw new IOException("checksum mismatch");
-        }
-        return bytes;
     }
 
-    /** Stream the APK into an install session; {@link InstallReceiver} gets the outcome. */
-    private static void install(Context context, byte[] apk) throws IOException {
+    /** Stream the cached APK into an install session; {@link InstallReceiver} gets the outcome. */
+    private static void install(Context context, File apkFile, long size) throws IOException {
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
         PackageInstaller.SessionParams params =
                 new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);
         params.setAppPackageName(context.getPackageName());
         int sessionId = installer.createSession(params);
         try (PackageInstaller.Session session = installer.openSession(sessionId)) {
-            try (OutputStream out = session.openWrite("base.apk", 0, apk.length)) {
-                out.write(apk);
+            byte[] buffer = new byte[8192];
+            try (InputStream in = new FileInputStream(apkFile);
+                    OutputStream out = session.openWrite("base.apk", 0, size)) {
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
                 session.fsync(out);
             }
             int flags = PendingIntent.FLAG_UPDATE_CURRENT;

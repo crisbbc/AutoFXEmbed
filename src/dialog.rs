@@ -1,6 +1,6 @@
-//! Small desktop dialogs used by the tray: a one-line text prompt and a
-//! notification, built on tools the OS already ships (PowerShell on Windows,
-//! `kdialog` / `zenity` / `notify-send` on Linux), so no GUI toolkit is linked.
+//! Small desktop dialogs used by the updater: a confirmation prompt and a
+//! notification, built on tools the OS already ships (Win32 `MessageBoxW` on
+//! Windows, `kdialog` / `zenity` / `notify-send` on Linux).
 
 #[cfg(target_os = "linux")]
 use std::process::Command;
@@ -27,7 +27,14 @@ pub fn confirm(title: &str, message: &str) -> bool {
         ("kdialog", vec!["--title", title, "--yesno", message]),
         (
             "zenity",
-            vec!["--question", "--title", title, "--text", message],
+            vec![
+                "--question",
+                "--no-markup",
+                "--title",
+                title,
+                "--text",
+                message,
+            ],
         ),
     ];
     for (program, args) in attempts {

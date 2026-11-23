@@ -15,6 +15,11 @@ final class Prefs {
 
     private static final String SELECTION = "x_target";
     private static final String CUSTOM_DOMAINS = "custom_domains";
+    private static final String EXTRA_RULES = "extra_rules";
+    private static final String REWRITE_X = "rewrite_x";
+    private static final String REWRITE_BSKY = "rewrite_bsky";
+    private static final String REWRITE_TIKTOK = "rewrite_tiktok";
+    private static final String X_TRANSLATE = "x_translate";
     private static final String STRIP_TRACKERS = "strip_trackers";
     private static final String AUTO_UPDATE = "auto_update";
     private static final String LAST_CHECK = "last_update_check";
@@ -65,6 +70,88 @@ final class Prefs {
         List<String> domains = customDomains();
         domains.remove(domain);
         prefs.edit().putString(CUSTOM_DOMAINS, TextUtils.join("\n", domains)).apply();
+    }
+
+    String extraRulesRaw() {
+        return prefs.getString(EXTRA_RULES, "");
+    }
+
+    /** Generic {@code [source, target]} site rewrite rules. */
+    List<String[]> extraRules() {
+        String raw = extraRulesRaw();
+        List<String[]> out = new ArrayList<>();
+        if (raw.isEmpty()) {
+            return out;
+        }
+        for (String line : raw.split("\n")) {
+            int arrow = line.indexOf(" -> ");
+            if (arrow > 0 && arrow + 4 < line.length()) {
+                out.add(new String[] {line.substring(0, arrow), line.substring(arrow + 4)});
+            }
+        }
+        return out;
+    }
+
+    void addExtraRule(String source, String target) {
+        List<String[]> rules = extraRules();
+        boolean updated = false;
+        for (String[] pair : rules) {
+            if (pair[0].equals(source)) {
+                pair[1] = target;
+                updated = true;
+                break;
+            }
+        }
+        if (!updated) {
+            rules.add(new String[] {source, target});
+        }
+        saveExtraRules(rules);
+    }
+
+    void removeExtraRule(String source) {
+        List<String[]> rules = extraRules();
+        rules.removeIf(pair -> pair[0].equals(source));
+        saveExtraRules(rules);
+    }
+
+    private void saveExtraRules(List<String[]> rules) {
+        List<String> lines = new ArrayList<>(rules.size());
+        for (String[] pair : rules) {
+            lines.add(pair[0] + " -> " + pair[1]);
+        }
+        prefs.edit().putString(EXTRA_RULES, TextUtils.join("\n", lines)).apply();
+    }
+
+    boolean rewriteX() {
+        return prefs.getBoolean(REWRITE_X, true);
+    }
+
+    void setRewriteX(boolean on) {
+        prefs.edit().putBoolean(REWRITE_X, on).apply();
+    }
+
+    boolean rewriteBsky() {
+        return prefs.getBoolean(REWRITE_BSKY, true);
+    }
+
+    void setRewriteBsky(boolean on) {
+        prefs.edit().putBoolean(REWRITE_BSKY, on).apply();
+    }
+
+    boolean rewriteTiktok() {
+        return prefs.getBoolean(REWRITE_TIKTOK, true);
+    }
+
+    void setRewriteTiktok(boolean on) {
+        prefs.edit().putBoolean(REWRITE_TIKTOK, on).apply();
+    }
+
+    String xTranslateLang() {
+        return prefs.getString(X_TRANSLATE, "");
+    }
+
+    void setXTranslateLang(String lang) {
+        prefs.edit().putString(X_TRANSLATE, lang == null ? "" : lang).apply();
     }
 
     boolean stripTrackers() {

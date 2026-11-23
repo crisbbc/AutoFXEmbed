@@ -1,6 +1,7 @@
 //! egui layout of the tray flyout.
 
-use std::time::{Duration, Instant};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use eframe::egui::{
     self, Align, Align2, Color32, CornerRadius, FontId, Layout, Margin, Pos2, Rect, RichText,
@@ -9,7 +10,7 @@ use eframe::egui::{
 
 use super::ipc::{Action, PanelState};
 use super::SIZE;
-use crate::config;
+use crate::{config, history};
 
 const TOAST: Duration = Duration::from_millis(1500);
 const EDGE_GAP: f32 = 8.0;
@@ -30,6 +31,7 @@ struct Palette {
     on_accent: Color32,
     danger: Color32,
     success: Color32,
+    warning: Color32,
 }
 
 impl Palette {
@@ -44,6 +46,7 @@ impl Palette {
         on_accent: Color32::WHITE,
         danger: Color32::from_rgb(0xf0, 0x6a, 0x6a),
         success: Color32::from_rgb(0x4c, 0xc3, 0x8a),
+        warning: Color32::from_rgb(0xf0, 0xb4, 0x4c),
     };
 
     const LIGHT: Self = Self {
@@ -57,6 +60,7 @@ impl Palette {
         on_accent: Color32::WHITE,
         danger: Color32::from_rgb(0xd9, 0x48, 0x48),
         success: Color32::from_rgb(0x1f, 0x9d, 0x63),
+        warning: Color32::from_rgb(0xc8, 0x7a, 0x14),
     };
 
     fn for_theme(theme: egui::Theme) -> Self {
@@ -69,28 +73,55 @@ impl Palette {
 
 pub struct App {
     state: PanelState,
+    updates: Receiver<PanelState>,
     new_domain: String,
-    error: Option<String>,
+    domain_error: Option<String>,
+    translate_input: String,
+    translate_error: Option<String>,
+    rule_source: String,
+    rule_target: String,
+    rule_error: Option<String>,
+    show_rules: bool,
+    recent_query: String,
+    show_all_recent: bool,
     show_about: bool,
-    copied: Option<Instant>,
-    checking: Option<Instant>,
+    copied: Option<(Instant, &'static str)>,
     seen_focus: bool,
     positioned: bool,
     icon: Option<TextureHandle>,
 }
 
 impl App {
-    pub fn new(state: PanelState) -> Self {
+    pub fn new(state: PanelState, updates: Receiver<PanelState>) -> Self {
+        let translate_input = state.x_translate_lang.clone().unwrap_or_default();
+        let show_rules = !state.extra_rules.is_empty();
         Self {
             state,
+            updates,
             new_domain: String::new(),
-            error: None,
+            domain_error: None,
+            translate_input,
+            translate_error: None,
+            rule_source: String::new(),
+            rule_target: String::new(),
+            rule_error: None,
+            show_rules,
+            recent_query: String::new(),
+            show_all_recent: false,
             show_about: false,
             copied: None,
-            checking: None,
             seen_focus: false,
             positioned: false,
             icon: None,
+        }
+    }
+
+    fn drain_updates(&mut self) {
+        while let Ok(updated) = self.updates.try_recv() {
+            if updated.x_translate_lang != self.state.x_translate_lang {
+                self.translate_input = updated.x_translate_lang.clone().unwrap_or_default();
+            }
+            self.state = updated;
         }
     }
 
@@ -103,8 +134,8 @@ impl App {
         }
     }
 
-    /// Put the window next to the tray icon, kept inside the monitor. The
-    /// anchor arrives in screen pixels, egui positions in points.
+    /// Put the window next to the tray icon, kept inside the clicked monitor.
+    /// The anchor and work_area arrive in screen pixels; egui positions in points.
     fn place(&mut self, ctx: &egui::Context) {
         if self.positioned {
             return;
@@ -118,15 +149,39 @@ impl App {
         };
         let scale = ctx.pixels_per_point();
         let (ax, ay) = (ax / scale, ay / scale);
-        let x =
-            (ax - SIZE[0] / 2.0).clamp(EDGE_GAP, (monitor.x - SIZE[0] - EDGE_GAP).max(EDGE_GAP));
+
+        let (min_x, min_y, max_x, max_y) = if let Some((l, t, r, b)) = self.state.work_area {
+            (l / scale, t / scale, r / scale, b / scale)
+        } else if ax >= 0.0 && ax <= monitor.x && ay >= 0.0 && ay <= monitor.y {
+            (0.0, 0.0, monitor.x, monitor.y)
+        } else {
+            // Secondary monitor whose origin is unknown on Linux: place directly
+            // next to the anchor without clamping back onto monitor 0.
+            let x = ax - SIZE[0] / 2.0;
+            let y = if ay > monitor.y / 2.0 {
+                ay - SIZE[1] - EDGE_GAP
+            } else {
+                ay + EDGE_GAP
+            };
+            ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
+            return;
+        };
+
+        let mid_y = (min_y + max_y) / 2.0;
+        let x = (ax - SIZE[0] / 2.0).clamp(
+            min_x + EDGE_GAP,
+            (max_x - SIZE[0] - EDGE_GAP).max(min_x + EDGE_GAP),
+        );
         // Taskbars sit at the bottom or top: open away from the nearer edge.
-        let y = if ay > monitor.y / 2.0 {
+        let y = if ay > mid_y {
             ay - SIZE[1] - EDGE_GAP
         } else {
             ay + EDGE_GAP
         };
-        let y = y.clamp(EDGE_GAP, (monitor.y - SIZE[1] - EDGE_GAP).max(EDGE_GAP));
+        let y = y.clamp(
+            min_y + EDGE_GAP,
+            (max_y - SIZE[1] - EDGE_GAP).max(min_y + EDGE_GAP),
+        );
         ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(x, y)));
     }
 
@@ -156,7 +211,7 @@ impl App {
         match config::normalize_domain(&self.new_domain) {
             Ok(domain) => {
                 if config::is_builtin_domain(&domain) {
-                    self.error = Some(format!("{domain} is already built in"));
+                    self.domain_error = Some(format!("{domain} is already built in"));
                     return;
                 }
                 self.send(&Action::AddCustom(domain.clone()));
@@ -166,10 +221,49 @@ impl App {
                 self.state.selected_builtin = None;
                 self.state.selected_custom = Some(domain);
                 self.new_domain.clear();
-                self.error = None;
+                self.domain_error = None;
             }
-            Err(reason) => self.error = Some(reason.to_string()),
+            Err(reason) => self.domain_error = Some(reason.to_string()),
         }
+    }
+
+    fn apply_translate(&mut self) {
+        match config::normalize_lang(&self.translate_input) {
+            Ok(lang) => {
+                self.send(&Action::SetXTranslate(lang.clone().unwrap_or_default()));
+                self.state.x_translate_lang = lang.clone();
+                self.translate_input = lang.unwrap_or_default();
+                self.translate_error = None;
+            }
+            Err(reason) => self.translate_error = Some(reason.to_string()),
+        }
+    }
+
+    fn add_rule(&mut self) {
+        match config::normalize_site_rule(&self.rule_source, &self.rule_target) {
+            Ok((source, target)) => {
+                self.send(&Action::AddExtraRule(source.clone(), target.clone()));
+                if let Some(existing) = self
+                    .state
+                    .extra_rules
+                    .iter_mut()
+                    .find(|(s, _)| s == &source)
+                {
+                    existing.1 = target;
+                } else {
+                    self.state.extra_rules.push((source, target));
+                }
+                self.rule_source.clear();
+                self.rule_target.clear();
+                self.rule_error = None;
+            }
+            Err(reason) => self.rule_error = Some(reason.to_string()),
+        }
+    }
+
+    fn remove_rule(&mut self, source: &str) {
+        self.send(&Action::RemoveExtraRule(source.to_string()));
+        self.state.extra_rules.retain(|(s, _)| s != source);
     }
 
     fn select_builtin(&mut self, id: &str) {
@@ -208,9 +302,17 @@ impl App {
                         .color(pal.text),
                 );
                 ui.label(
-                    RichText::new(format!("v{}", env!("CARGO_PKG_VERSION")))
-                        .size(11.0)
-                        .color(pal.weak),
+                    RichText::new(if self.state.paused {
+                        format!("v{} · Paused", env!("CARGO_PKG_VERSION"))
+                    } else {
+                        format!("v{}", env!("CARGO_PKG_VERSION"))
+                    })
+                    .size(11.0)
+                    .color(if self.state.paused {
+                        pal.warning
+                    } else {
+                        pal.weak
+                    }),
                 );
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -219,6 +321,23 @@ impl App {
                     .clicked()
                 {
                     self.show_about = !self.show_about;
+                }
+                let pause_label = if self.state.paused { "Resume" } else { "Pause" };
+                let pause_color = if self.state.paused {
+                    pal.warning
+                } else {
+                    pal.weak
+                };
+                if pill_button(ui, pal, pause_label, pause_color, self.state.paused)
+                    .on_hover_text(if self.state.paused {
+                        "Resume rewriting links"
+                    } else {
+                        "Temporarily pause rewriting"
+                    })
+                    .clicked()
+                {
+                    self.state.paused = !self.state.paused;
+                    self.send(&Action::TogglePaused);
                 }
             });
         });
@@ -230,7 +349,97 @@ impl App {
         }
     }
 
+    fn sites(&mut self, ui: &mut egui::Ui, pal: Palette) {
+        section_title(ui, pal, "Sites");
+        card(ui, pal, |ui| {
+            if switch_row(ui, pal, "X / Twitter", &mut self.state.rewrite_x) {
+                self.send(&Action::ToggleSiteX);
+            }
+            divider(ui, pal);
+            if switch_row(
+                ui,
+                pal,
+                "Bluesky (fxbsky.app)",
+                &mut self.state.rewrite_bsky,
+            ) {
+                self.send(&Action::ToggleSiteBsky);
+            }
+            divider(ui, pal);
+            if switch_row(
+                ui,
+                pal,
+                "TikTok (tnktok.com)",
+                &mut self.state.rewrite_tiktok,
+            ) {
+                self.send(&Action::ToggleSiteTiktok);
+            }
+            divider(ui, pal);
+
+            let rules_count = self.state.extra_rules.len();
+            let toggle_text = if rules_count == 0 {
+                if self.show_rules {
+                    "Hide custom site rules"
+                } else {
+                    "Custom site rules…"
+                }
+            } else if self.show_rules {
+                "Hide custom site rules"
+            } else {
+                "Show custom site rules"
+            };
+            let suffix = if rules_count > 0 {
+                format!("{toggle_text} ({rules_count})")
+            } else {
+                toggle_text.to_string()
+            };
+            if action_row(ui, pal, &suffix, pal.accent, true).clicked() {
+                self.show_rules = !self.show_rules;
+            }
+
+            if self.show_rules {
+                for (source, target) in self.state.extra_rules.clone() {
+                    if removable_rule_row(ui, pal, &source, &target) {
+                        self.remove_rule(&source);
+                    }
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let field_w = ((ui.available_width() - 62.0) / 2.0).max(60.0);
+                    let src_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_source)
+                            .hint_text(RichText::new("reddit.com").color(pal.weak))
+                            .margin(Margin::symmetric(6, 5))
+                            .background_color(pal.window)
+                            .desired_width(field_w),
+                    );
+                    let dst_edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.rule_target)
+                            .hint_text(RichText::new("rxddit.com").color(pal.weak))
+                            .margin(Margin::symmetric(6, 5))
+                            .background_color(pal.window)
+                            .desired_width(field_w),
+                    );
+                    let submitted = (src_edit.lost_focus() || dst_edit.lost_focus())
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    let enabled =
+                        !self.rule_source.trim().is_empty() && !self.rule_target.trim().is_empty();
+                    if (accent_button(ui, pal, "Add", enabled).clicked() || submitted) && enabled {
+                        self.add_rule();
+                    }
+                });
+                if let Some(error) = &self.rule_error {
+                    ui.add_space(2.0);
+                    ui.label(RichText::new(error).size(11.5).color(pal.danger));
+                }
+            }
+        });
+    }
+
     fn targets(&mut self, ui: &mut egui::Ui, pal: Palette) {
+        if !self.state.rewrite_x {
+            return;
+        }
         section_title(ui, pal, "X / Twitter links go to");
         card(ui, pal, |ui| {
             let targets = self.state.targets.clone();
@@ -267,32 +476,68 @@ impl App {
                     self.add_domain();
                 }
             });
-            if let Some(error) = &self.error {
+            if let Some(error) = &self.domain_error {
+                ui.add_space(2.0);
+                ui.label(RichText::new(error).size(11.5).color(pal.danger));
+            }
+
+            ui.add_space(4.0);
+            divider(ui, pal);
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.label(RichText::new("Auto-translate").size(12.5).color(pal.text))
+                    .on_hover_text("Append a language code (e.g. en, es) to X post URLs");
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let dirty = self.translate_input.trim().to_ascii_lowercase()
+                        != self.state.x_translate_lang.as_deref().unwrap_or("");
+                    if accent_button(ui, pal, "Save", dirty).clicked() && dirty {
+                        self.apply_translate();
+                    }
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut self.translate_input)
+                            .hint_text(RichText::new("off (e.g. en)").color(pal.weak))
+                            .margin(Margin::symmetric(8, 5))
+                            .background_color(pal.window)
+                            .desired_width(92.0),
+                    );
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        self.apply_translate();
+                    }
+                });
+            });
+            if let Some(error) = &self.translate_error {
                 ui.add_space(2.0);
                 ui.label(RichText::new(error).size(11.5).color(pal.danger));
             }
         });
-        ui.add_space(4.0);
-        ui.label(
-            RichText::new("TikTok links always use tnktok.com")
-                .size(11.5)
-                .color(pal.weak),
-        );
     }
 
     fn recent(&mut self, ui: &mut egui::Ui, pal: Palette) {
         ui.horizontal(|ui| {
             section_title(ui, pal, "Recent");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if self.copied.is_some_and(|at| at.elapsed() < TOAST) {
-                    pill(ui, "Copied", pal.success);
-                } else if !self.state.recent.is_empty() && link_button(ui, pal, "Clear").clicked() {
+                if let Some((at, label)) = self.copied {
+                    if at.elapsed() < TOAST {
+                        pill(ui, label, pal.success);
+                        return;
+                    }
+                }
+                if !self.state.recent.is_empty() && link_button(ui, pal, "Clear").clicked() {
                     self.send(&Action::ClearHistory);
                     self.state.recent.clear();
+                    self.recent_query.clear();
                 }
             });
         });
-        let mut copy = None;
+
+        let mut copy_embed = None;
+        let mut copy_original = None;
+        let mut remove_embed = None;
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+
         card(ui, pal, |ui| {
             if self.state.recent.is_empty() {
                 ui.add_sized(
@@ -303,21 +548,107 @@ impl App {
                 );
                 return;
             }
-            for entry in &self.state.recent {
+
+            if self.state.recent.len() > 3 {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.recent_query)
+                        .hint_text(RichText::new("Filter recent links…").color(pal.weak))
+                        .margin(Margin::symmetric(8, 5))
+                        .background_color(pal.window)
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(2.0);
+            }
+
+            let query = self.recent_query.trim().to_ascii_lowercase();
+            let filtered: Vec<&history::Entry> = self
+                .state
+                .recent
+                .iter()
+                .filter(|entry| {
+                    if query.is_empty() {
+                        return true;
+                    }
+                    let matches = |s: &str| s.to_ascii_lowercase().contains(&query);
+                    matches(&entry.embed)
+                        || matches(&entry.original)
+                        || entry.title.as_deref().is_some_and(matches)
+                        || entry.description.as_deref().is_some_and(matches)
+                        || entry.site.as_deref().is_some_and(matches)
+                })
+                .collect();
+
+            if filtered.is_empty() {
+                ui.add_sized(
+                    [ui.available_width(), 36.0],
+                    egui::Label::new(RichText::new("No matching links").color(pal.weak)),
+                );
+                return;
+            }
+
+            let limit = if self.show_all_recent || !query.is_empty() {
+                filtered.len()
+            } else {
+                filtered.len().min(history::MENU_ENTRIES)
+            };
+
+            for entry in &filtered[..limit] {
                 let title = entry
                     .title
                     .as_deref()
                     .or(entry.site.as_deref())
                     .unwrap_or(&entry.embed);
                 let site = entry.site.as_deref().unwrap_or("");
-                if recent_row(ui, pal, site, title, &entry.embed).clicked() {
-                    copy = Some(entry.embed.clone());
+                let subtitle = entry
+                    .description
+                    .as_deref()
+                    .filter(|d| !d.trim().is_empty())
+                    .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .unwrap_or_else(|| {
+                        entry
+                            .embed
+                            .trim_start_matches("https://")
+                            .trim_start_matches("http://")
+                            .to_string()
+                    });
+                let age = format_age(now_secs.saturating_sub(entry.copied_at));
+                let tooltip = format!(
+                    "{}\n{}\nClick to copy embed · Hover buttons for original / remove",
+                    history::menu_label(entry),
+                    entry.embed
+                );
+                let res = recent_row(ui, pal, site, title, &subtitle, &age, &tooltip);
+                if res.removed {
+                    remove_embed = Some(entry.embed.clone());
+                } else if res.copied_original {
+                    copy_original = Some(entry.original.clone());
+                } else if res.clicked {
+                    copy_embed = Some(entry.embed.clone());
+                }
+            }
+
+            if query.is_empty() && filtered.len() > history::MENU_ENTRIES {
+                ui.add_space(2.0);
+                let label = if self.show_all_recent {
+                    "Show fewer".to_string()
+                } else {
+                    format!("Show all ({})", filtered.len())
+                };
+                if action_row(ui, pal, &label, pal.accent, true).clicked() {
+                    self.show_all_recent = !self.show_all_recent;
                 }
             }
         });
-        if let Some(embed) = copy {
+
+        if let Some(embed) = remove_embed {
+            self.send(&Action::RemoveRecent(embed.clone()));
+            self.state.recent.retain(|e| e.embed != embed);
+        } else if let Some(original) = copy_original {
+            self.send(&Action::CopyOriginal(original));
+            self.copied = Some((Instant::now(), "Copied original"));
+        } else if let Some(embed) = copy_embed {
             self.send(&Action::CopyRecent(embed));
-            self.copied = Some(Instant::now());
+            self.copied = Some((Instant::now(), "Copied"));
         }
     }
 
@@ -346,15 +677,15 @@ impl App {
                 self.send(&Action::ToggleAutoUpdate);
             }
             divider(ui, pal);
-            let checking = self.checking.is_some_and(|at| at.elapsed() < TOAST * 2);
+            let checking = self.state.checking_update;
             let label = if checking {
                 "Checking for updates…"
             } else {
                 "Check for updates now"
             };
             if action_row(ui, pal, label, pal.accent, !checking).clicked() {
+                self.state.checking_update = true;
                 self.send(&Action::CheckUpdate);
-                self.checking = Some(Instant::now());
             }
         });
     }
@@ -366,6 +697,7 @@ impl eframe::App for App {
     }
 
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.drain_updates();
         self.place(ctx);
 
         // Behave like a flyout: close on Esc or when focus moves elsewhere.
@@ -377,8 +709,15 @@ impl eframe::App for App {
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
-        // Repaint so the toast labels expire without further input.
-        ctx.request_repaint_after(Duration::from_millis(500));
+        // Only schedule a future repaint while a toast is visible (no idle polling).
+        if let Some((at, _)) = self.copied {
+            let elapsed = at.elapsed();
+            if elapsed < TOAST {
+                ctx.request_repaint_after(TOAST - elapsed + Duration::from_millis(16));
+            } else {
+                self.copied = None;
+            }
+        }
 
         let pal = Palette::for_theme(ctx.theme());
         apply_style(ctx, pal);
@@ -405,7 +744,11 @@ impl eframe::App for App {
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
                 .show(ui, |ui| {
-                    self.targets(ui, pal);
+                    self.sites(ui, pal);
+                    if self.state.rewrite_x {
+                        ui.add_space(12.0);
+                        self.targets(ui, pal);
+                    }
                     ui.add_space(12.0);
                     self.recent(ui, pal);
                     ui.add_space(12.0);
@@ -418,6 +761,18 @@ impl eframe::App for App {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
         });
+    }
+}
+
+fn format_age(secs: u64) -> String {
+    if secs < 60 {
+        "now".into()
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86_400)
     }
 }
 
@@ -633,17 +988,75 @@ fn choice_row(
     RowResponse { clicked, removed }
 }
 
-/// A history entry: a site monogram, the title, and the embed link.
+fn removable_rule_row(ui: &mut egui::Ui, pal: Palette, source: &str, target: &str) -> bool {
+    let (rect, response) =
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 28.0), Sense::hover());
+    row_background(ui, pal, rect, &response);
+    let label = format!("{source} -> {target}");
+    painted_text(
+        ui,
+        Pos2::new(rect.left() + 10.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        &label,
+        FontId::proportional(12.0),
+        pal.text,
+        rect.width() - 40.0,
+    );
+    let btn = Rect::from_center_size(
+        Pos2::new(rect.right() - 16.0, rect.center().y),
+        Vec2::splat(20.0),
+    );
+    let btn_response = ui.interact(btn, response.id.with("del_rule"), Sense::click());
+    let color = if btn_response.hovered() {
+        pal.danger
+    } else {
+        pal.weak
+    };
+    if btn_response.hovered() {
+        ui.painter()
+            .rect_filled(btn, CornerRadius::same(5), pal.danger.gamma_multiply(0.15));
+    }
+    draw_cross(ui, btn.center(), 3.5, Stroke::new(1.5_f32, color));
+    btn_response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("Remove rule")
+        .clicked()
+}
+
+struct RecentResponse {
+    clicked: bool,
+    copied_original: bool,
+    removed: bool,
+}
+
+/// A history entry: monogram, title, description/link snippet, age, and hover
+/// buttons for copying the original URL or deleting the entry.
 fn recent_row(
     ui: &mut egui::Ui,
     pal: Palette,
     site: &str,
     title: &str,
-    embed: &str,
-) -> egui::Response {
+    subtitle: &str,
+    age: &str,
+    tooltip: &str,
+) -> RecentResponse {
     let (rect, response) =
-        ui.allocate_exact_size(Vec2::new(ui.available_width(), 42.0), Sense::click());
-    row_background(ui, pal, rect, &response);
+        ui.allocate_exact_size(Vec2::new(ui.available_width(), 44.0), Sense::click());
+    let del_btn = Rect::from_center_size(
+        Pos2::new(rect.right() - 16.0, rect.center().y),
+        Vec2::splat(22.0),
+    );
+    let orig_btn = Rect::from_center_size(
+        Pos2::new(rect.right() - 42.0, rect.center().y),
+        Vec2::splat(22.0),
+    );
+    let hovered_row = response.hovered()
+        || ui.rect_contains_pointer(del_btn)
+        || ui.rect_contains_pointer(orig_btn);
+    if hovered_row {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(7), pal.hover);
+    }
 
     let badge = Rect::from_center_size(
         Pos2::new(rect.left() + 20.0, rect.center().y),
@@ -668,8 +1081,79 @@ fn recent_row(
         pal.accent,
     );
 
+    let mut copied_original = false;
+    let mut removed = false;
+    let right_reserved = if hovered_row {
+        let orig_res = ui.interact(orig_btn, response.id.with("orig"), Sense::click());
+        if orig_res.hovered() {
+            ui.painter().rect_filled(
+                orig_btn,
+                CornerRadius::same(6),
+                pal.accent.gamma_multiply(0.18),
+            );
+        }
+        ui.painter().text(
+            orig_btn.center(),
+            Align2::CENTER_CENTER,
+            "RAW",
+            FontId::proportional(8.0),
+            if orig_res.hovered() {
+                pal.accent
+            } else {
+                pal.weak
+            },
+        );
+        copied_original = orig_res
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Copy original link (no rewrite)")
+            .clicked();
+
+        let del_res = ui.interact(del_btn, response.id.with("del"), Sense::click());
+        if del_res.hovered() {
+            ui.painter().rect_filled(
+                del_btn,
+                CornerRadius::same(6),
+                pal.danger.gamma_multiply(0.15),
+            );
+        }
+        draw_cross(
+            ui,
+            del_btn.center(),
+            3.8,
+            Stroke::new(
+                1.5_f32,
+                if del_res.hovered() {
+                    pal.danger
+                } else {
+                    pal.weak
+                },
+            ),
+        );
+        removed = del_res
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .on_hover_text("Remove from history")
+            .clicked();
+        60.0
+    } else {
+        let age_rect = painted_text(
+            ui,
+            Pos2::new(rect.right() - 8.0, rect.top() + 7.0),
+            Align2::RIGHT_TOP,
+            age,
+            FontId::proportional(10.5),
+            pal.weak,
+            40.0,
+        );
+        age_rect.width() + 14.0
+    };
+
     let text_left = rect.left() + 42.0;
-    let width = rect.right() - text_left - 10.0;
+    let title_width = rect.right() - text_left - right_reserved;
+    let sub_width = if hovered_row {
+        rect.right() - text_left - 60.0
+    } else {
+        rect.right() - text_left - 10.0
+    };
     painted_text(
         ui,
         Pos2::new(text_left, rect.top() + 6.0),
@@ -677,23 +1161,29 @@ fn recent_row(
         title,
         FontId::proportional(13.0),
         pal.text,
-        width,
+        title_width,
     );
-    let link = embed
-        .trim_start_matches("https://")
-        .trim_start_matches("http://");
     painted_text(
         ui,
-        Pos2::new(text_left, rect.top() + 23.0),
+        Pos2::new(text_left, rect.top() + 24.0),
         Align2::LEFT_TOP,
-        link,
+        subtitle,
         FontId::proportional(11.0),
         pal.weak,
-        width,
+        sub_width,
     );
-    response
+
+    let clicked = response
         .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text("Click to copy")
+        .on_hover_text(tooltip)
+        .clicked()
+        && !copied_original
+        && !removed;
+    RecentResponse {
+        clicked,
+        copied_original,
+        removed,
+    }
 }
 
 /// A label with a toggle switch on the right. Returns true when it flipped.
@@ -792,6 +1282,49 @@ fn accent_button(ui: &mut egui::Ui, pal: Palette, label: &str, enabled: bool) ->
     } else {
         response
     }
+}
+
+fn pill_button(
+    ui: &mut egui::Ui,
+    pal: Palette,
+    label: &str,
+    color: Color32,
+    highlighted: bool,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(Vec2::new(62.0, 26.0), Sense::click());
+    let fill = if highlighted {
+        color.gamma_multiply(0.22)
+    } else if response.hovered() {
+        pal.hover
+    } else {
+        pal.card
+    };
+    ui.painter().rect(
+        rect,
+        CornerRadius::same(8),
+        fill,
+        Stroke::new(
+            1.0_f32,
+            if highlighted {
+                color.gamma_multiply(0.6)
+            } else {
+                pal.border
+            },
+        ),
+        StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::proportional(11.5),
+        if highlighted || response.hovered() {
+            color
+        } else {
+            pal.text
+        },
+    );
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn link_button(ui: &mut egui::Ui, pal: Palette, label: &str) -> egui::Response {

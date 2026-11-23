@@ -3,18 +3,18 @@
 //! ## Windows
 //!
 //! Creates a message-only window, registers as a clipboard-format listener,
-//! adds the tray icon, and runs the standard Win32 message pump.
-//! Clipboard updates arrive via `WM_CLIPBOARDUPDATE`; tray events via
-//! `TRAY_CALLBACK_MSG`.
+//! adds the tray icon (re-adding it on `TaskbarCreated`), and runs the standard
+//! Win32 message pump. Clipboard updates arrive via `WM_CLIPBOARDUPDATE`; tray
+//! events via `TRAY_CALLBACK_MSG`.
 //!
 //! ## Linux
 //!
 //! Uses `ksni` (pure-Rust D-Bus StatusNotifierItem) for the tray icon —
 //! zero X11/GTK dependencies, works on both X11 and Wayland.
-//! On native X11 sessions, XFixes selection-owner events wake clipboard
-//! processing; on Wayland, data-control selection events do (see
-//! [`crate::wayland_watch`]). Compositors without data-control and unknown
-//! environments use a slower fallback poll.
+//! On Wayland with data-control, clipboard/primary events and tray actions all
+//! wake a single channel so the loop achieves zero idle wakeups. On native X11
+//! sessions, XFixes selection-owner events wake the loop alongside a slow 5 s
+//! safety read. Compositors without data-control use a 250 ms fallback poll.
 
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
@@ -34,17 +34,36 @@ pub fn request_quit() {
     }
 }
 
+/// Write `text` to the clipboard without letting the monitor rewrite it
+/// (used by "Copy original" on Windows; Linux routes through the monitor loop).
+#[cfg(target_os = "windows")]
+pub fn copy_without_rewrite(text: &str) -> bool {
+    if let Ok(mut guard) = SKIP_ONCE.lock() {
+        *guard = Some(text.to_string());
+    }
+    if !clipboard::write_text(text) {
+        if let Ok(mut guard) = SKIP_ONCE.lock() {
+            *guard = None;
+        }
+        return false;
+    }
+    true
+}
+
 /// Handoff between the clipboard-update handler and the deferred writer
-/// (Windows only — on Linux we write directly from the poll callback).
+/// (Windows only — on Linux we write directly from the monitor loop).
 #[cfg(target_os = "windows")]
 struct PendingWrite {
     source: String,
     replacement: String,
     links: Vec<crate::transform::Rewrite>,
+    attempts: u8,
 }
 
 #[cfg(target_os = "windows")]
 static PENDING_WRITE: Mutex<Option<PendingWrite>> = Mutex::new(None);
+#[cfg(target_os = "windows")]
+static SKIP_ONCE: Mutex<Option<String>> = Mutex::new(None);
 
 // =========================================================================
 // Windows
@@ -53,6 +72,7 @@ static PENDING_WRITE: Mutex<Option<PendingWrite>> = Mutex::new(None);
 #[cfg(target_os = "windows")]
 mod win {
     use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
     use windows_sys::Win32::System::DataExchange::{
         AddClipboardFormatListener, RemoveClipboardFormatListener,
@@ -60,8 +80,8 @@ mod win {
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-        PostQuitMessage, RegisterClassExW, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_MESSAGE,
-        MSG, WM_CLIPBOARDUPDATE, WM_DESTROY, WNDCLASSEXW,
+        PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, TranslateMessage, CS_HREDRAW,
+        CS_VREDRAW, HWND_MESSAGE, MSG, WM_CLIPBOARDUPDATE, WM_DESTROY, WNDCLASSEXW,
     };
 
     /// Custom message: perform the deferred clipboard write.
@@ -70,6 +90,10 @@ mod win {
     /// Custom message: leave the message loop (posted by `request_quit` from other threads,
     /// since `PostQuitMessage` only affects the calling thread's queue).
     const WM_APP_QUIT: u32 = 0x8003;
+    const MAX_WRITE_RETRIES: u8 = 5;
+
+    /// Message id broadcast by Explorer whenever the taskbar is recreated.
+    static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
 
     /// `HWND` is `*mut c_void`, which isn't `Send`. Store it as `usize`
     /// (trivially `Send`) and cast back when posting — we never dereference it.
@@ -94,6 +118,10 @@ mod win {
     pub fn run() {
         unsafe {
             let class_name = clipboard::wide("AutoFxEmbedListener");
+            TASKBAR_CREATED_MSG.store(
+                RegisterWindowMessageW(clipboard::wide("TaskbarCreated").as_ptr()),
+                Ordering::Relaxed,
+            );
 
             let mut wc: WNDCLASSEXW = std::mem::zeroed();
             wc.cbSize = std::mem::size_of::<WNDCLASSEXW>() as u32;
@@ -170,6 +198,11 @@ mod win {
         lparam: LPARAM,
     ) -> LRESULT {
         unsafe {
+            let taskbar_created = TASKBAR_CREATED_MSG.load(Ordering::Relaxed);
+            if taskbar_created != 0 && msg == taskbar_created {
+                crate::tray::add(hwnd);
+                return 0;
+            }
             match msg {
                 WM_CLIPBOARDUPDATE => {
                     handle_clipboard_update_win(hwnd);
@@ -201,6 +234,9 @@ mod win {
     /// don't re-enter the clipboard during the update broadcast).
     unsafe fn handle_clipboard_update_win(hwnd: HWND) {
         unsafe {
+            if crate::config::is_paused() {
+                return;
+            }
             let text = (0..3).find_map(|attempt| {
                 let text = clipboard::read_text();
                 if text.is_none() && attempt < 2 {
@@ -209,9 +245,14 @@ mod win {
                 text
             });
             let Some(text) = text else {
-                eprintln!("AutoFxEmbed: unable to read clipboard text");
                 return;
             };
+            if let Ok(mut skip) = SKIP_ONCE.lock() {
+                if skip.as_deref() == Some(text.as_str()) {
+                    *skip = None;
+                    return;
+                }
+            }
             let Some((new_text, links)) = transform_text_links(&text) else {
                 return;
             };
@@ -220,6 +261,7 @@ mod win {
                     source: text,
                     replacement: new_text,
                     links,
+                    attempts: 0,
                 });
                 if windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
                     hwnd,
@@ -238,7 +280,14 @@ mod win {
     }
 
     /// Retry a failed write later without blocking the Windows message loop.
-    fn retry_pending_write(hwnd: HWND, pending: PendingWrite) {
+    fn retry_pending_write(hwnd: HWND, mut pending: PendingWrite) {
+        pending.attempts = pending.attempts.saturating_add(1);
+        if pending.attempts > MAX_WRITE_RETRIES {
+            eprintln!(
+                "AutoFxEmbed: giving up on clipboard write after {MAX_WRITE_RETRIES} retries"
+            );
+            return;
+        }
         let hwnd = SendHwnd::new(hwnd);
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_secs(1));
@@ -312,14 +361,22 @@ mod linux_impl {
     use crate::wayland_watch::{Change, WaylandWatcher};
 
     /// Poll interval for compositors without data-control and other
-    /// environments without a watcher. X11 (XFixes) and Wayland (data-control)
-    /// sessions are event-driven, with a slow safety read because ownership
-    /// events do not report content changes made by the same owner.
+    /// environments without a watcher. X11 uses XFixes events + a slow 5 s
+    /// safety read; Wayland with data-control sleeps indefinitely with zero
+    /// idle wakeups.
     const FALLBACK_POLL: Duration = Duration::from_millis(250);
     const X11_SAFETY_POLL: Duration = Duration::from_secs(5);
-    const QUIT_CHECK: Duration = Duration::from_millis(100);
-    const PRIMARY_RESULT_CHECK: Duration = Duration::from_millis(10);
     const MAX_PRIMARY_BYTES: usize = 1024 * 1024;
+
+    /// Unified event waking the Linux monitor loop (zero polling when idle).
+    enum LoopEvent {
+        Change(Change),
+        WatcherStopped,
+        PrimaryReady,
+        /// Copy `text` directly (embed or original) without rewriting it.
+        Copy(String),
+        Quit,
+    }
 
     /// Whichever event-driven selection watcher the session supports.
     enum Watcher {
@@ -328,11 +385,8 @@ mod linux_impl {
     }
 
     impl Watcher {
-        fn changes(&self) -> &Receiver<Change> {
-            match self {
-                Watcher::X11(watcher) => &watcher.changes,
-                Watcher::Wayland(watcher) => &watcher.changes,
-            }
+        fn needs_safety_poll(&self) -> bool {
+            matches!(self, Watcher::X11(_))
         }
 
         fn shutdown(self) {
@@ -351,7 +405,6 @@ mod linux_impl {
     }
 
     struct X11Watcher {
-        changes: Receiver<Change>,
         shutdown_connection: RustConnection,
         shutdown_atom: xproto::Atom,
         shutdown_window: xproto::Window,
@@ -360,10 +413,7 @@ mod linux_impl {
 
     impl X11Watcher {
         fn shutdown(self) {
-            // Claim a private selection to wake the blocking watcher with a
-            // guaranteed owner-change event, even if it was previously empty.
             let X11Watcher {
-                changes: _,
                 shutdown_connection,
                 shutdown_atom,
                 shutdown_window,
@@ -382,7 +432,6 @@ mod linux_impl {
 
         fn join(self) {
             let X11Watcher {
-                changes: _,
                 shutdown_connection,
                 shutdown_atom: _,
                 shutdown_window,
@@ -395,9 +444,8 @@ mod linux_impl {
     }
 
     /// Start an XFixes watcher when the native desktop session is X11.
-    ///
     /// Wayland sessions fall through to [`WaylandWatcher`] instead.
-    fn start_x11_watcher() -> Option<X11Watcher> {
+    fn start_x11_watcher(tx: Sender<LoopEvent>) -> Option<X11Watcher> {
         if std::env::var_os("DISPLAY").is_none() || std::env::var_os("WAYLAND_DISPLAY").is_some() {
             return None;
         }
@@ -451,24 +499,28 @@ mod linux_impl {
         }
         connection.flush().ok()?;
 
-        let (sender, receiver) = mpsc::channel();
         let watcher_thread = thread::spawn(move || {
+            let mut clean_shutdown = false;
             while let Ok(event) = connection.wait_for_event() {
                 if let Event::XfixesSelectionNotify(event) = event {
                     if event.selection == shutdown_atom {
+                        clean_shutdown = true;
                         break;
                     }
                     if event.selection == clipboard_atom
                         && event.subtype == SelectionEvent::SET_SELECTION_OWNER
-                        && sender.send(Change::Clipboard).is_err()
+                        && tx.send(LoopEvent::Change(Change::Clipboard)).is_err()
                     {
+                        clean_shutdown = true;
                         break;
                     }
                 }
             }
+            if !clean_shutdown {
+                let _ = tx.send(LoopEvent::WatcherStopped);
+            }
         });
         Some(X11Watcher {
-            changes: receiver,
             shutdown_connection,
             shutdown_atom,
             shutdown_window,
@@ -476,9 +528,8 @@ mod linux_impl {
         })
     }
 
-    /// Long-lived worker that reads PRIMARY on request. A broken selection owner
-    /// can block the worker, but never the event loop, and pending requests
-    /// coalesce into one so at most one read is ever outstanding.
+    /// Long-lived worker that reads PRIMARY on request and wakes the event loop
+    /// immediately when a read completes.
     struct PrimaryReader {
         results: Receiver<Option<String>>,
         requests: Sender<()>,
@@ -486,7 +537,7 @@ mod linux_impl {
     }
 
     impl PrimaryReader {
-        fn new() -> Self {
+        fn new(wake: Sender<LoopEvent>) -> Self {
             let (result_tx, results) = mpsc::channel();
             let (requests, request_rx) = mpsc::channel::<()>();
             let pending = Arc::new(AtomicBool::new(false));
@@ -494,12 +545,11 @@ mod linux_impl {
             thread::spawn(move || {
                 while request_rx.recv().is_ok() {
                     let result = read_primary_text();
-                    // Clear before publishing so a new request is accepted as
-                    // soon as the caller can observe this result.
                     worker_pending.store(false, Ordering::Release);
                     if result_tx.send(result).is_err() {
                         break;
                     }
+                    let _ = wake.send(LoopEvent::PrimaryReady);
                 }
             });
             Self {
@@ -518,10 +568,6 @@ mod linux_impl {
             {
                 self.pending.store(false, Ordering::Release);
             }
-        }
-
-        fn is_pending(&self) -> bool {
-            self.pending.load(Ordering::Acquire)
         }
 
         fn take(&self) -> Option<String> {
@@ -564,17 +610,28 @@ mod linux_impl {
     }
 
     pub fn run() {
-        let (tray_handle, quit_flag, copy_request) = match crate::tray::spawn() {
-            Ok(control) => (control.handle, control.quit, control.copy_request),
+        let (event_tx, event_rx) = mpsc::channel::<LoopEvent>();
+
+        let copy_tx = event_tx.clone();
+        let quit_tx = event_tx.clone();
+        let tray_handle = match crate::tray::spawn(
+            move |text| {
+                let _ = copy_tx.send(LoopEvent::Copy(text));
+            },
+            move || {
+                let _ = quit_tx.send(LoopEvent::Quit);
+            },
+        ) {
+            Ok(handle) => handle,
             Err(error) => {
                 eprintln!("AutoFxEmbed: tray unavailable: {error:?}");
                 return;
             }
         };
 
-        let quit_for_updates = Arc::clone(&quit_flag);
+        let quit_for_updates = event_tx.clone();
         let _ = QUIT_HOOK.set(Box::new(move || {
-            quit_for_updates.store(true, Ordering::SeqCst);
+            let _ = quit_for_updates.send(LoopEvent::Quit);
         }));
 
         // On Wayland clipboard data is hosted by the application, so we must
@@ -589,8 +646,6 @@ mod linux_impl {
             }
         };
 
-        // Track the last clipboard text we saw so we can detect real changes
-        // (and avoid re-writing our own transformed text back into the loop).
         let mut last_text = String::new();
         let mut last_primary = String::new();
         let mut failed_text: Option<String> = None;
@@ -600,22 +655,113 @@ mod linux_impl {
         // PRIMARY access goes through wl-clipboard-rs, which only works on Wayland.
         let primary_reader = std::env::var_os("WAYLAND_DISPLAY")
             .is_some()
-            .then(PrimaryReader::new);
+            .then(|| PrimaryReader::new(event_tx.clone()));
         let mut was_empty = false;
-        let mut watcher = WaylandWatcher::start()
-            .map(Watcher::Wayland)
-            .or_else(|| start_x11_watcher().map(|w| Watcher::X11(Box::new(w))));
-        let mut next_safety_poll = Instant::now();
+
+        let wl_change_tx = event_tx.clone();
+        let wl_disc_tx = event_tx.clone();
+        let mut watcher = WaylandWatcher::start(
+            move |change| {
+                let _ = wl_change_tx.send(LoopEvent::Change(change));
+            },
+            move || {
+                let _ = wl_disc_tx.send(LoopEvent::WatcherStopped);
+            },
+        )
+        .map(Watcher::Wayland)
+        .or_else(|| start_x11_watcher(event_tx.clone()).map(|w| Watcher::X11(Box::new(w))));
+
+        let mut next_safety_poll = Instant::now() + X11_SAFETY_POLL;
 
         loop {
-            if quit_flag.load(Ordering::SeqCst) {
+            // Compute the next wakeup deadline (None = block indefinitely with 0 CPU).
+            let now = Instant::now();
+            let retry_wait = failed_text
+                .as_ref()
+                .map(|_| retry_at.saturating_duration_since(now));
+            let primary_wait = failed_primary
+                .as_ref()
+                .map(|_| primary_retry_at.saturating_duration_since(now));
+            let safety_wait = match watcher.as_ref() {
+                Some(active) if active.needs_safety_poll() => {
+                    Some(next_safety_poll.saturating_duration_since(now))
+                }
+                Some(_) => None,
+                None => Some(FALLBACK_POLL),
+            };
+
+            let timeout = [safety_wait, retry_wait, primary_wait]
+                .into_iter()
+                .flatten()
+                .min();
+
+            let first_event = match timeout {
+                Some(wait) => match event_rx.recv_timeout(wait) {
+                    Ok(ev) => Some(ev),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                },
+                None => match event_rx.recv() {
+                    Ok(ev) => Some(ev),
+                    Err(_) => break,
+                },
+            };
+
+            let mut quit = false;
+            let mut process_clipboard = false;
+            let mut primary_changed = false;
+            let mut copy_requested: Option<String> = None;
+            let mut watcher_stopped = false;
+
+            if let Some(first) = first_event {
+                for ev in std::iter::once(first).chain(event_rx.try_iter()) {
+                    match ev {
+                        LoopEvent::Quit => quit = true,
+                        LoopEvent::Copy(text) => copy_requested = Some(text),
+                        LoopEvent::Change(Change::Clipboard) => process_clipboard = true,
+                        LoopEvent::Change(Change::Primary) => primary_changed = true,
+                        LoopEvent::WatcherStopped => watcher_stopped = true,
+                        LoopEvent::PrimaryReady => {}
+                    }
+                }
+            } else {
+                // Timed wakeup: fallback poll, X11 safety poll, or write retry.
+                let now = Instant::now();
+                if watcher.is_none() {
+                    process_clipboard = true;
+                    primary_changed = true;
+                } else {
+                    if watcher.as_ref().is_some_and(Watcher::needs_safety_poll)
+                        && now >= next_safety_poll
+                    {
+                        process_clipboard = true;
+                        next_safety_poll = now + X11_SAFETY_POLL;
+                    }
+                    if failed_text.is_some() && now >= retry_at {
+                        process_clipboard = true;
+                    }
+                    if failed_primary.is_some() && now >= primary_retry_at {
+                        primary_changed = true;
+                    }
+                }
+            }
+
+            if quit {
                 break;
             }
 
-            // A link picked from the tray's Recent submenu: put it back on the
-            // clipboard (and PRIMARY) from here, where the clipboard lives.
-            let requested = copy_request.lock().ok().and_then(|mut r| r.take());
-            if let Some(link) = requested {
+            if watcher_stopped {
+                eprintln!("AutoFxEmbed: clipboard watcher stopped; using fallback polling");
+                if let Some(stopped) = watcher.take() {
+                    stopped.join();
+                }
+                process_clipboard = true;
+                primary_changed = true;
+            }
+
+            // A link picked from the panel's Recent list (embed or original):
+            // write it directly and record it as last_text so it isn't rewritten.
+            if let Some(link) = copy_requested {
                 match clipboard.set_text(&link) {
                     Ok(()) => {
                         if primary_reader.is_some() && set_primary(&link) {
@@ -629,83 +775,18 @@ mod linux_impl {
                 }
             }
 
-            // (watcher gone, CLIPBOARD needs a read, PRIMARY needs a read, safety poll due)
-            let (watcher_disconnected, process_clipboard, primary_changed, safety_poll_due) =
-                match watcher.as_ref() {
-                    Some(active) => {
-                        let now = Instant::now();
-                        let safety_wait = next_safety_poll.saturating_duration_since(now);
-                        let retry_wait = failed_text
-                            .as_ref()
-                            .map(|_| retry_at.saturating_duration_since(now))
-                            .unwrap_or(Duration::MAX);
-                        let primary_wait = failed_primary
-                            .as_ref()
-                            .map(|_| primary_retry_at.saturating_duration_since(now))
-                            .unwrap_or(Duration::MAX);
-
-                        let mut wait_until = safety_wait
-                            .min(retry_wait)
-                            .min(primary_wait)
-                            .min(QUIT_CHECK);
-                        // Pick up an in-flight PRIMARY read promptly.
-                        if primary_reader
-                            .as_ref()
-                            .is_some_and(PrimaryReader::is_pending)
-                        {
-                            wait_until = wait_until.min(PRIMARY_RESULT_CHECK);
-                        }
-                        match active.changes().recv_timeout(wait_until) {
-                            Ok(first) => {
-                                // Coalesce a burst of owner changes into one read.
-                                let mut clipboard_changed = first == Change::Clipboard;
-                                let mut primary_changed = first == Change::Primary;
-                                for change in active.changes().try_iter() {
-                                    clipboard_changed |= change == Change::Clipboard;
-                                    primary_changed |= change == Change::Primary;
-                                }
-                                (false, clipboard_changed, primary_changed, false)
-                            }
-                            Err(RecvTimeoutError::Timeout) => {
-                                let safety_due = safety_wait <= wait_until;
-                                let retry_due = retry_wait <= wait_until;
-                                let primary_due = primary_wait <= wait_until;
-                                (
-                                    false,
-                                    safety_due || retry_due,
-                                    safety_due || primary_due,
-                                    safety_due,
-                                )
-                            }
-                            Err(RecvTimeoutError::Disconnected) => {
-                                eprintln!(
-                                    "AutoFxEmbed: clipboard watcher stopped; using fallback polling"
-                                );
-                                (true, true, true, false)
-                            }
-                        }
-                    }
-                    None => {
-                        thread::sleep(FALLBACK_POLL);
-                        (false, true, true, false)
-                    }
-                };
-            if watcher_disconnected {
-                if let Some(stopped) = watcher.take() {
-                    stopped.join();
-                }
-            }
-            if safety_poll_due {
-                next_safety_poll = Instant::now() + X11_SAFETY_POLL;
-            }
+            let paused = crate::config::is_paused();
 
             // ---- clipboard processing ----
             if process_clipboard {
-                // CLIPBOARD selection (Ctrl+C, copy buttons).
                 match clipboard.get_text() {
                     Ok(text) => {
                         was_empty = false;
-                        if text != last_text
+                        if paused {
+                            // Keep last_text current so resuming never rewrites old copies.
+                            last_text = text;
+                            failed_text = None;
+                        } else if text != last_text
                             && (failed_text.as_deref() != Some(text.as_str())
                                 || Instant::now() >= retry_at)
                         {
@@ -742,27 +823,29 @@ mod linux_impl {
                 }
             }
 
-            // PRIMARY selection (mouse selection / middle-click paste) — some apps
-            // publish copies only there. Reads happen on a bounded worker so a
-            // broken selection owner cannot block this event loop.
+            // PRIMARY selection (mouse selection / middle-click paste).
             if let Some(text) = primary_reader.as_ref().and_then(PrimaryReader::take) {
-                let can_retry = failed_primary.as_deref() != Some(text.as_str())
-                    || Instant::now() >= primary_retry_at;
-                if text != last_primary && text != last_text && can_retry {
-                    if let Some((new_text, links)) = transform_text_links(&text) {
-                        eprintln!("AutoFxEmbed: rewrote link(s) in primary selection");
-                        // Only PRIMARY is rewritten; the Ctrl+C clipboard is left alone.
-                        if set_primary(&new_text) {
-                            crate::history::record(&links);
-                            last_primary = new_text;
-                            failed_primary = None;
+                if paused {
+                    last_primary = text;
+                    failed_primary = None;
+                } else {
+                    let can_retry = failed_primary.as_deref() != Some(text.as_str())
+                        || Instant::now() >= primary_retry_at;
+                    if text != last_primary && text != last_text && can_retry {
+                        if let Some((new_text, links)) = transform_text_links(&text) {
+                            eprintln!("AutoFxEmbed: rewrote link(s) in primary selection");
+                            if set_primary(&new_text) {
+                                crate::history::record(&links);
+                                last_primary = new_text;
+                                failed_primary = None;
+                            } else {
+                                failed_primary = Some(text);
+                                primary_retry_at = Instant::now() + Duration::from_secs(1);
+                            }
                         } else {
-                            failed_primary = Some(text);
-                            primary_retry_at = Instant::now() + Duration::from_secs(1);
+                            last_primary = text;
+                            failed_primary = None;
                         }
-                    } else {
-                        last_primary = text;
-                        failed_primary = None;
                     }
                 }
             }
@@ -798,9 +881,7 @@ enum LockOutcome {
 }
 
 fn lock_single_instance() -> LockOutcome {
-    let Some(dir) =
-        dirs::runtime_dir().or_else(|| dirs::config_dir().map(|path| path.join("autofxembed")))
-    else {
+    let Some(dir) = dirs::runtime_dir().or_else(crate::storage::config_dir) else {
         eprintln!("AutoFxEmbed: no runtime/config dir; single-instance lock disabled");
         return LockOutcome::Unavailable;
     };
@@ -828,7 +909,8 @@ fn lock_single_instance() -> LockOutcome {
         }
     }
 }
-/// Start the clipboard monitor + tray icon.  Blocks until the user quits.
+
+/// Start the clipboard monitor + tray icon. Blocks until the user quits.
 pub fn run() {
     let _single_instance = match lock_single_instance() {
         LockOutcome::Held(file) => Some(file),
@@ -841,6 +923,15 @@ pub fn run() {
     crate::config::load();
     crate::history::load();
     crate::update::load();
+
+    // Wire live state updates to the open flyout panel and tray icon.
+    crate::config::set_on_change(|| {
+        crate::panel::push_state();
+        crate::tray::refresh();
+    });
+    crate::history::set_on_change(crate::panel::push_state);
+    crate::update::set_on_change(crate::panel::push_state);
+
     crate::update::start();
     #[cfg(target_os = "windows")]
     win::run();

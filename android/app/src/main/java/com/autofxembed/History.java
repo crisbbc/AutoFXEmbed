@@ -19,7 +19,9 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -54,6 +56,7 @@ final class History {
     }
 
     private static final Object LOCK = new Object();
+    private static final Set<String> IN_FLIGHT = new HashSet<>();
     private static final ExecutorService FETCHER = Executors.newSingleThreadExecutor();
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static List<Entry> entries;
@@ -111,6 +114,19 @@ final class History {
         }
     }
 
+    static void remove(Context context, String embed) {
+        boolean removed;
+        synchronized (LOCK) {
+            removed = load(context).removeIf(entry -> entry.embed.equals(embed));
+            if (removed) {
+                save(context);
+            }
+        }
+        if (removed) {
+            changed();
+        }
+    }
+
     static void clear(Context context) {
         synchronized (LOCK) {
             load(context).clear();
@@ -119,13 +135,13 @@ final class History {
         changed();
     }
 
-    /** Read the embed data of every entry that doesn't have it yet. */
+    /** Read the embed data of every entry that doesn't have it yet (deduplicated). */
     static void fetchPending(Context context) {
         Context app = context.getApplicationContext();
         List<String> pending = new ArrayList<>();
         synchronized (LOCK) {
             for (Entry entry : load(app)) {
-                if (!entry.fetched) {
+                if (!entry.fetched && IN_FLIGHT.add(entry.embed)) {
                     pending.add(entry.embed);
                 }
             }
@@ -136,49 +152,59 @@ final class History {
     }
 
     private static void fetch(Context context, String embed) {
-        String[] og;
         try {
-            og = readEmbed(embed);
-        } catch (IOException e) {
-            // Offline or a flaky server: keep the entry and try again next time.
-            Log.w(TAG, "embed read failed: " + e);
-            return;
-        }
-        synchronized (LOCK) {
-            List<Entry> list = load(context);
-            Entry entry = null;
-            for (Entry candidate : list) {
-                if (candidate.embed.equals(embed)) {
-                    entry = candidate;
-                }
-            }
-            // Cleared or trimmed while the read ran, or already done.
-            if (entry == null || entry.fetched) {
+            String[] og;
+            try {
+                og = readEmbed(embed);
+            } catch (IOException e) {
+                // Offline, 429, or 5xx server error: keep the entry and retry next time.
+                Log.w(TAG, "embed read failed: " + e);
                 return;
             }
-            if (og == null) {
-                // Not an embed page (e.g. a bare host bouncing elsewhere): drop it.
-                list.remove(entry);
-            } else {
-                entry.fetched = true;
-                entry.site = og[0];
-                entry.title = og[1];
-                entry.description = og[2];
-                entry.image = og[3];
+            synchronized (LOCK) {
+                List<Entry> list = load(context);
+                Entry entry = null;
+                for (Entry candidate : list) {
+                    if (candidate.embed.equals(embed)) {
+                        entry = candidate;
+                    }
+                }
+                // Cleared or trimmed while the read ran, or already done.
+                if (entry == null || entry.fetched) {
+                    return;
+                }
+                if (og == null) {
+                    // Confirmed non-embed (4xx or unrelated redirect): drop it.
+                    list.remove(entry);
+                } else {
+                    entry.fetched = true;
+                    entry.site = og[0];
+                    entry.title = og[1];
+                    entry.description = og[2];
+                    entry.image = og[3];
+                }
+                save(context);
             }
-            save(context);
+            changed();
+        } finally {
+            synchronized (LOCK) {
+                IN_FLIGHT.remove(embed);
+            }
         }
-        changed();
     }
 
-    /** The page's {@code [site, title, description, image]}, or null if it is no embed. */
+    /** The page's {@code [site, title, description, image]}, or null if confirmed non-embed. */
     private static String[] readEmbed(String embed) throws IOException {
         HttpURLConnection connection = (HttpURLConnection) new URL(embed).openConnection();
         try {
             connection.setConnectTimeout(TIMEOUT_MS);
             connection.setReadTimeout(TIMEOUT_MS);
             connection.setRequestProperty("User-Agent", USER_AGENT);
-            if (connection.getResponseCode() >= 400) {
+            int code = connection.getResponseCode();
+            if (code == 429 || code >= 500) {
+                throw new IOException("transient HTTP " + code);
+            }
+            if (code >= 400) {
                 return null;
             }
             String html;

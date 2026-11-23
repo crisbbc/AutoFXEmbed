@@ -6,15 +6,18 @@
 //! network. State (auto-check toggle, last check, declined version) lives in
 //! `<config dir>/autofxembed/updates.json`.
 
-use std::io::Read;
+use std::fs::OpenOptions;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use autofxembed_core::is_newer;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+
+use crate::storage::{config_dir, config_file, write_atomic};
 
 const LATEST_URL: &str = "https://api.github.com/repos/crisbbc/AutoFXEmbed/releases/latest";
 const CURRENT: &str = env!("CARGO_PKG_VERSION");
@@ -82,21 +85,40 @@ enum Trigger {
 static STATE: Mutex<State> = Mutex::new(State::new());
 /// Only one check / download at a time.
 static CHECKING: AtomicBool = AtomicBool::new(false);
+static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Set once an update is installed: the executable to relaunch after exit.
 static RESTART: OnceLock<PathBuf> = OnceLock::new();
+type ChangeHook = Box<dyn Fn() + Send + Sync>;
+static ON_CHANGE: OnceLock<ChangeHook> = OnceLock::new();
 
 fn state() -> std::sync::MutexGuard<'static, State> {
     STATE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 fn state_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|p| p.join("autofxembed").join("updates.json"))
+    config_file("updates.json")
 }
 
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// Register a callback run when update status or settings change.
+pub fn set_on_change(hook: impl Fn() + Send + Sync + 'static) {
+    let _ = ON_CHANGE.set(Box::new(hook));
+}
+
+fn notify_changed() {
+    if let Some(hook) = ON_CHANGE.get() {
+        hook();
+    }
+}
+
+/// True while an update check or download is currently in progress.
+pub fn is_checking() -> bool {
+    CHECKING.load(Ordering::SeqCst)
 }
 
 /// Load the persisted state (call once at startup). Missing/corrupt file → defaults.
@@ -118,16 +140,9 @@ fn save(state: &State) {
     let Some(path) = state_path() else {
         return;
     };
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string(state).map_err(std::io::Error::other)?;
-        // Write-then-rename so a crash never leaves a half-written file.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
-    })();
+    let result = serde_json::to_string(state)
+        .map_err(std::io::Error::other)
+        .and_then(|json| write_atomic(&path, &json));
     if let Err(error) = result {
         eprintln!("AutoFxEmbed: unable to save update state: {error}");
     }
@@ -139,9 +154,12 @@ pub fn auto_enabled() -> bool {
 }
 
 pub fn toggle_auto() {
-    let mut state = state();
-    state.auto_check = !state.auto_check;
-    save(&state);
+    {
+        let mut state = state();
+        state.auto_check = !state.auto_check;
+        save(&state);
+    }
+    notify_changed();
 }
 
 /// The executable to relaunch once the app has exited after an update.
@@ -205,8 +223,12 @@ fn is_cargo_install(exe: &Path) -> bool {
 fn asset_name() -> Option<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("autofxembed-linux-x86_64")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("autofxembed-linux-aarch64")
     } else if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
         Some("autofxembed-windows-x86_64.exe")
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        Some("autofxembed-windows-aarch64.exe")
     } else {
         None
     }
@@ -241,6 +263,9 @@ fn fetch_latest() -> Result<Release, String> {
 }
 
 fn download(asset: &Asset, expected: [u8; 32]) -> Result<Vec<u8>, String> {
+    if !asset.browser_download_url.starts_with("https://") {
+        return Err("refusing non-HTTPS download URL".into());
+    }
     if asset.size == 0 || asset.size > MAX_ASSET_BYTES {
         return Err(format!("unexpected download size ({} bytes)", asset.size));
     }
@@ -264,11 +289,55 @@ fn download(asset: &Asset, expected: [u8; 32]) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// Create an exclusive temporary file in a private directory (preferring the
+/// running binary's own directory, then config dir, then OS temp dir) so
+/// shared `/tmp` races are avoided and renames stay on the same filesystem.
+fn create_staging_file(exe: &Path) -> std::io::Result<(PathBuf, std::fs::File)> {
+    let mut dirs = Vec::new();
+    if let Some(parent) = exe.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    if let Some(cfg) = config_dir() {
+        let _ = std::fs::create_dir_all(&cfg);
+        dirs.push(cfg);
+    }
+    dirs.push(std::env::temp_dir());
+
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+
+    let mut last_err = None;
+    for dir in dirs {
+        for _ in 0..8 {
+            let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+            let candidate = dir.join(format!(".autofxembed-update-{pid}-{nanos}-{seq}.tmp"));
+            match OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(file) => return Ok((candidate, file)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    last_err = Some(e);
+                    break;
+                }
+            }
+        }
+    }
+    Err(last_err
+        .unwrap_or_else(|| std::io::Error::other("unable to create staging file for update")))
+}
+
 /// Swap the running executable for `bytes`.
-fn install(bytes: &[u8]) -> Result<(), String> {
-    let tmp = std::env::temp_dir().join(format!("autofxembed-update-{}", std::process::id()));
+fn install(bytes: &[u8], exe: &Path) -> Result<(), String> {
+    let (tmp, mut file) = create_staging_file(exe).map_err(|e| e.to_string())?;
     let result = (|| -> std::io::Result<()> {
-        std::fs::write(&tmp, bytes)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -280,12 +349,21 @@ fn install(bytes: &[u8]) -> Result<(), String> {
     result.map_err(|e| e.to_string())
 }
 
+struct CheckingGuard;
+impl Drop for CheckingGuard {
+    fn drop(&mut self) {
+        CHECKING.store(false, Ordering::SeqCst);
+        notify_changed();
+    }
+}
+
 fn check(trigger: Trigger) {
     if CHECKING.swap(true, Ordering::SeqCst) {
         return;
     }
+    notify_changed();
+    let _guard = CheckingGuard;
     check_inner(trigger);
-    CHECKING.store(false, Ordering::SeqCst);
 }
 
 fn check_inner(trigger: Trigger) {
@@ -369,7 +447,7 @@ fn check_inner(trigger: Trigger) {
         Ok(bytes) => bytes,
         Err(reason) => return failed(reason),
     };
-    if let Err(reason) = install(&bytes) {
+    if let Err(reason) = install(&bytes, &exe) {
         return failed(reason);
     }
 
@@ -452,6 +530,17 @@ mod tests {
         assert!(!is_cargo_install(Path::new(
             "/home/u/Downloads/autofxembed"
         )));
+    }
+
+    #[test]
+    fn rejects_non_https_download_urls() {
+        let asset = Asset {
+            name: "autofxembed-linux-x86_64".into(),
+            browser_download_url: "http://example.com/bin".into(),
+            size: 100,
+            digest: None,
+        };
+        assert!(download(&asset, [0u8; 32]).is_err());
     }
 
     #[test]

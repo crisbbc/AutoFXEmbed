@@ -34,24 +34,57 @@ fn string_array<'local>(
     Ok(array)
 }
 
-/// `static native String[] transform(String text, String selection, boolean stripTrackers)`
+fn parse_extra_rules(raw: &str) -> Vec<(String, String)> {
+    let mut rules = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((src, dst)) = trimmed.split_once("->") else {
+            continue;
+        };
+        if let Ok((source, target)) = autofxembed_core::normalize_site_rule(src, dst) {
+            if !rules.iter().any(|(s, _)| s == &source) {
+                rules.push((source, target));
+            }
+        }
+    }
+    rules
+}
+
+/// `static native String[] transform(String text, String selection, boolean stripTrackers,
+///     boolean rewriteX, boolean rewriteBsky, boolean rewriteTiktok,
+///     String translateLang, String extraRules)`
 ///
 /// `selection` is a built-in target id or `custom:<domain>`; unknown ids fall
 /// back to FixUpX. Returns `null` when nothing changed, else
 /// `[newText, original0, embed0, original1, embed1, ...]` listing every link
 /// that was rewritten to an embed host.
 #[unsafe(no_mangle)]
+#[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_com_autofxembed_Native_transform<'caller>(
     mut unowned_env: EnvUnowned<'caller>,
     _class: JClass<'caller>,
     text: JString<'caller>,
     selection: JString<'caller>,
     strip_trackers: jboolean,
+    rewrite_x: jboolean,
+    rewrite_bsky: jboolean,
+    rewrite_tiktok: jboolean,
+    translate_lang: JString<'caller>,
+    extra_rules: JString<'caller>,
 ) -> JObjectArray<'caller, JString<'caller>> {
     unowned_env
         .with_env(|env| -> Result<_> {
             let text = text.try_to_string(env)?;
             let selection = selection.try_to_string(env)?;
+            let translate_lang = opt_string(env, &translate_lang)?
+                .and_then(|s| autofxembed_core::normalize_lang(&s).ok().flatten());
+            let extra_rules = opt_string(env, &extra_rules)?
+                .map(|s| parse_extra_rules(&s))
+                .unwrap_or_default();
+
             let custom = selection
                 .strip_prefix(CUSTOM_PREFIX)
                 .and_then(|domain| autofxembed_core::normalize_domain(domain).ok());
@@ -65,6 +98,11 @@ pub extern "system" fn Java_com_autofxembed_Native_transform<'caller>(
             let opts = Options {
                 x_rules,
                 strip_trackers,
+                rewrite_x,
+                rewrite_bsky,
+                rewrite_tiktok,
+                extra_rules: &extra_rules,
+                x_translate_lang: translate_lang.as_deref(),
             };
             let Some((out, links)) = autofxembed_core::transform_text_links(&text, &opts) else {
                 return Ok(JObjectArray::<JString>::null());
@@ -114,6 +152,47 @@ pub extern "system" fn Java_com_autofxembed_Native_normalizeDomain<'caller>(
                     string_array(env, &[None, Some(&reason)])
                 }
                 Ok(domain) => string_array(env, &[Some(&domain), None]),
+                Err(reason) => string_array(env, &[None, Some(reason)]),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `static native String[] normalizeSiteRule(String source, String target)`:
+/// `[source, target, null]` when valid, else `[null, null, reason]`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_autofxembed_Native_normalizeSiteRule<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    source: JString<'caller>,
+    target: JString<'caller>,
+) -> JObjectArray<'caller, JString<'caller>> {
+    unowned_env
+        .with_env(|env| -> Result<_> {
+            let source = source.try_to_string(env)?;
+            let target = target.try_to_string(env)?;
+            match autofxembed_core::normalize_site_rule(&source, &target) {
+                Ok((src, dst)) => string_array(env, &[Some(&src), Some(&dst), None]),
+                Err(reason) => string_array(env, &[None, None, Some(reason)]),
+            }
+        })
+        .resolve::<ThrowRuntimeExAndDefault>()
+}
+
+/// `static native String[] normalizeLang(String input)`:
+/// `[langOrEmpty, null]` when valid, else `[null, reason]`.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_com_autofxembed_Native_normalizeLang<'caller>(
+    mut unowned_env: EnvUnowned<'caller>,
+    _class: JClass<'caller>,
+    input: JString<'caller>,
+) -> JObjectArray<'caller, JString<'caller>> {
+    unowned_env
+        .with_env(|env| -> Result<_> {
+            let input = input.try_to_string(env)?;
+            match autofxembed_core::normalize_lang(&input) {
+                Ok(Some(lang)) => string_array(env, &[Some(&lang), None]),
+                Ok(None) => string_array(env, &[Some(""), None]),
                 Err(reason) => string_array(env, &[None, Some(reason)]),
             }
         })

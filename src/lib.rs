@@ -5,6 +5,7 @@ pub mod dialog;
 pub mod history;
 pub mod monitor;
 pub mod panel;
+pub mod storage;
 pub mod transform;
 pub mod tray;
 pub mod update;

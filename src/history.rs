@@ -4,9 +4,11 @@
 //! Entries are kept newest first, capped at [`MAX_ENTRIES`], and persisted as
 //! JSON under the OS config dir. The embed metadata is read from the OpenGraph
 //! tags of the rewritten URL by a single background worker, so the clipboard
-//! loop never waits on the network. A link whose read fails (request error,
-//! redirect to an unrelated page, no embed data) is removed again.
+//! loop never waits on the network. A link whose page is genuinely not an embed
+//! (4xx / redirect to unrelated page / no OG tags) is removed again; transient
+//! network or 5xx/429 errors keep the entry so it can be retried later.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
@@ -17,11 +19,12 @@ use serde::{Deserialize, Serialize};
 
 use autofxembed_core::embed::{is_embed, parse_og, Og};
 
+use crate::storage::{config_file, write_atomic};
 use crate::transform::Rewrite;
 
 /// Most entries kept; the oldest are dropped first.
 const MAX_ENTRIES: usize = 100;
-/// Entries shown in the tray's Recent submenu.
+/// Default number of entries shown in the panel's Recent section.
 pub const MENU_ENTRIES: usize = 10;
 const MAX_BODY_BYTES: u64 = 512 * 1024;
 const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -44,19 +47,28 @@ pub struct Entry {
     pub description: Option<String>,
     #[serde(default)]
     pub image: Option<String>,
-    /// True once the metadata fetch has succeeded; entries whose fetch fails
-    /// are dropped from the history.
+    /// True once the metadata fetch has succeeded.
     #[serde(default)]
     pub fetched: bool,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum FetchOutcome {
+    Ok(Og),
+    /// Confirmed non-embed (4xx other than 429, unrelated redirect, or no OG data).
+    NotEmbed,
+    /// Offline, timeout, 429 rate-limit, or 5xx server error: keep and retry later.
+    TransientError,
+}
+
 static HISTORY: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
+static IN_FLIGHT: Mutex<Option<HashSet<String>>> = Mutex::new(None);
 static FETCH_QUEUE: OnceLock<Sender<String>> = OnceLock::new();
 type ChangeHook = Box<dyn Fn() + Send + Sync>;
 static ON_CHANGE: OnceLock<ChangeHook> = OnceLock::new();
 
 fn history_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|p| p.join("autofxembed").join("history.json"))
+    config_file("history.json")
 }
 
 fn now() -> u64 {
@@ -69,8 +81,22 @@ fn lock() -> std::sync::MutexGuard<'static, Vec<Entry>> {
     HISTORY.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Register a callback run whenever the history changes from a background
-/// thread (used by the Linux tray to refresh its menu). Only the first call wins.
+fn in_flight_insert(embed: &str) -> bool {
+    let mut guard = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .get_or_insert_with(HashSet::new)
+        .insert(embed.to_string())
+}
+
+fn in_flight_remove(embed: &str) {
+    let mut guard = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(set) = guard.as_mut() {
+        set.remove(embed);
+    }
+}
+
+/// Register a callback run whenever the history changes (used to push live
+/// updates to an open tray panel). Only the first call wins.
 pub fn set_on_change(hook: impl Fn() + Send + Sync + 'static) {
     let _ = ON_CHANGE.set(Box::new(hook));
 }
@@ -98,31 +124,17 @@ pub fn load() {
             return;
         }
     };
-    let pending: Vec<String> = entries
-        .iter()
-        .filter(|entry| !entry.fetched)
-        .map(|entry| entry.embed.clone())
-        .collect();
     *lock() = entries;
-    for embed in pending {
-        queue_fetch(embed);
-    }
+    retry_pending();
 }
 
 fn save(entries: &[Entry]) {
     let Some(path) = history_path() else {
         return;
     };
-    let result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let json = serde_json::to_string(entries).map_err(std::io::Error::other)?;
-        // Write-then-rename so a crash never leaves a half-written file.
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
-        std::fs::rename(&tmp, &path)
-    })();
+    let result = serde_json::to_string(entries)
+        .map_err(std::io::Error::other)
+        .and_then(|json| write_atomic(&path, &json));
     if let Err(error) = result {
         eprintln!("AutoFxEmbed: unable to save history: {error}");
     }
@@ -170,9 +182,40 @@ pub fn record(links: &[Rewrite]) {
     notify_changed();
 }
 
+/// Retry metadata fetches for any entries that previously failed due to
+/// transient errors (e.g. while offline). Deduplicates in-flight URLs.
+pub fn retry_pending() {
+    let pending: Vec<String> = lock()
+        .iter()
+        .filter(|entry| !entry.fetched)
+        .map(|entry| entry.embed.clone())
+        .collect();
+    for embed in pending {
+        queue_fetch(embed);
+    }
+}
+
 /// The newest `n` entries.
 pub fn recent(n: usize) -> Vec<Entry> {
     lock().iter().take(n).cloned().collect()
+}
+
+/// Every stored history entry (up to [`MAX_ENTRIES`]), newest first.
+pub fn all() -> Vec<Entry> {
+    lock().clone()
+}
+
+/// Forget a single entry by its embed URL.
+pub fn remove(embed: &str) {
+    let mut entries = lock();
+    let before = entries.len();
+    entries.retain(|e| e.embed != embed);
+    if entries.len() == before {
+        return;
+    }
+    save(&entries);
+    drop(entries);
+    notify_changed();
 }
 
 /// Forget every entry.
@@ -184,8 +227,7 @@ pub fn clear() {
     notify_changed();
 }
 
-/// One-line menu label: `title — description`, or the embed URL until the
-/// metadata is known.
+/// One-line label: `title — description`, or the embed URL until metadata arrives.
 pub fn menu_label(entry: &Entry) -> String {
     autofxembed_core::embed::label(
         entry.title.as_deref(),
@@ -199,6 +241,9 @@ pub fn menu_label(entry: &Entry) -> String {
 // ---------------------------------------------------------------------------
 
 fn queue_fetch(embed: String) {
+    if !in_flight_insert(&embed) {
+        return;
+    }
     let sender = FETCH_QUEUE.get_or_init(|| {
         let (sender, receiver) = mpsc::channel::<String>();
         std::thread::spawn(move || {
@@ -208,60 +253,77 @@ fn queue_fetch(embed: String) {
                 .build()
                 .into();
             while let Ok(embed) = receiver.recv() {
-                let og = fetch_og(&agent, &embed);
-                store_metadata(&embed, og);
+                let outcome = fetch_og(&agent, &embed);
+                in_flight_remove(&embed);
+                store_metadata(&embed, outcome);
             }
         });
         sender
     });
-    let _ = sender.send(embed);
+    if sender.send(embed.clone()).is_err() {
+        in_flight_remove(&embed);
+    }
 }
 
-/// Read the embed data of `url`. `None` means the read failed: the request
-/// errored, it was redirected to an unrelated page (a bare `fixupx.com` bounces
-/// to GitHub), or the page has no embed data.
-fn fetch_og(agent: &ureq::Agent, url: &str) -> Option<Og> {
+/// Read the embed data of `url`, distinguishing permanent non-embeds from
+/// transient offline/5xx/429 failures.
+fn fetch_og(agent: &ureq::Agent, url: &str) -> FetchOutcome {
     use ureq::ResponseExt;
-    let response = agent.get(url).call().ok()?;
+    let response = match agent.get(url).call() {
+        Ok(response) => response,
+        Err(ureq::Error::StatusCode(code)) if (400..500).contains(&code) && code != 429 => {
+            return FetchOutcome::NotEmbed;
+        }
+        Err(_) => return FetchOutcome::TransientError,
+    };
     let final_uri = response.get_uri().to_string();
     let mut bytes = Vec::new();
-    response
+    if response
         .into_body()
         .into_reader()
         .take(MAX_BODY_BYTES)
         .read_to_end(&mut bytes)
-        .ok()?;
+        .is_err()
+    {
+        return FetchOutcome::TransientError;
+    }
     let og = parse_og(&String::from_utf8_lossy(&bytes));
-    is_embed(url, &final_uri, &og).then_some(og)
+    if is_embed(url, &final_uri, &og) {
+        FetchOutcome::Ok(og)
+    } else {
+        FetchOutcome::NotEmbed
+    }
 }
 
-/// Apply a finished fetch to the list: fill in the metadata, or drop the entry
-/// when the read failed. Returns true if the list changed.
-fn apply_metadata(entries: &mut Vec<Entry>, embed: &str, og: Option<Og>) -> bool {
+/// Apply a finished fetch to the list: fill in the metadata, drop confirmed
+/// non-embeds, or leave untouched on transient errors. Returns true if changed.
+fn apply_metadata(entries: &mut Vec<Entry>, embed: &str, outcome: FetchOutcome) -> bool {
     // The entry may have been cleared or trimmed while the fetch ran.
     let Some(index) = entries.iter().position(|e| e.embed == embed) else {
         return false;
     };
-    match og {
-        Some(og) => {
+    match outcome {
+        FetchOutcome::Ok(og) => {
             let entry = &mut entries[index];
             entry.fetched = true;
             entry.site = og.site;
             entry.title = og.title;
             entry.description = og.description;
             entry.image = og.image;
+            true
         }
-        None => {
+        FetchOutcome::NotEmbed => {
             entries.remove(index);
+            true
         }
+        FetchOutcome::TransientError => false,
     }
-    true
 }
 
-fn store_metadata(embed: &str, og: Option<Og>) {
+fn store_metadata(embed: &str, outcome: FetchOutcome) {
     {
         let mut entries = lock();
-        if !apply_metadata(&mut entries, embed, og) {
+        if !apply_metadata(&mut entries, embed, outcome) {
             return;
         }
         save(&entries);
@@ -302,15 +364,33 @@ mod tests {
     }
 
     #[test]
-    fn failed_reads_drop_the_entry() {
+    fn permanent_non_embeds_drop_the_entry_while_transient_errors_keep_it() {
         let mut entries = Vec::new();
         push(&mut entries, &link(1), 10);
         push(&mut entries, &link(2), 20);
-        assert!(apply_metadata(&mut entries, &link(1).embed, None));
+        // Transient error keeps the entry unfetched for later retry.
+        assert!(!apply_metadata(
+            &mut entries,
+            &link(1).embed,
+            FetchOutcome::TransientError
+        ));
+        assert_eq!(entries.len(), 2);
+        assert!(!entries[1].fetched);
+
+        // Confirmed non-embed drops it.
+        assert!(apply_metadata(
+            &mut entries,
+            &link(1).embed,
+            FetchOutcome::NotEmbed
+        ));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].embed, link(2).embed);
         // Already gone: nothing to do.
-        assert!(!apply_metadata(&mut entries, &link(1).embed, None));
+        assert!(!apply_metadata(
+            &mut entries,
+            &link(1).embed,
+            FetchOutcome::NotEmbed
+        ));
     }
 
     #[test]
@@ -320,7 +400,7 @@ mod tests {
         assert!(apply_metadata(
             &mut entries,
             &link(1).embed,
-            Some(og_with_title())
+            FetchOutcome::Ok(og_with_title())
         ));
         assert!(entries[0].fetched);
         assert_eq!(entries[0].title.as_deref(), Some("Jane (@jane)"));

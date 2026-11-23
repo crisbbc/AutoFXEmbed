@@ -91,7 +91,7 @@ abstract class CargoNdkTask @Inject constructor(private val exec: ExecOperations
             abis.get().forEach { args += listOf("-t", it) }
             args += listOf(
                 "-o", outputDir.get().asFile.absolutePath,
-                "build", "--release", "-p", "autofxembed-android",
+                "build", "--release", "--locked", "-p", "autofxembed-android",
             )
             commandLine(args)
         }

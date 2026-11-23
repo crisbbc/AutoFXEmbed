@@ -39,7 +39,6 @@ const PER_SITE: &[(&str, &[&str])] = &[
     ("youtube.com", &["si", "pp", "feature"]),
     ("youtu.be", &["si", "feature"]),
     ("spotify.com", &["si", "nd"]),
-    ("instagram.com", &["img_index"]),
     ("reddit.com", &["share_id", "rdt", "ref_source"]),
 ];
 
@@ -144,5 +143,14 @@ mod tests {
         assert_eq!(strip("x.com", true, "/search?q=a&src=typed"), None);
         // `utm` alone is not a `utm_` parameter.
         assert_eq!(strip("example.com", false, "/?utm=1"), None);
+        // `img_index` selects a carousel slide on Instagram, so it must stay.
+        assert_eq!(
+            strip("www.instagram.com", false, "/p/ABC/?img_index=3&igsh=xyz").as_deref(),
+            Some("/p/ABC/?img_index=3")
+        );
+        assert_eq!(
+            strip("www.instagram.com", false, "/p/ABC/?img_index=3"),
+            None
+        );
     }
 }

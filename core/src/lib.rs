@@ -9,7 +9,10 @@ mod trackers;
 mod transform;
 mod version;
 
-pub use domains::{custom_rules, is_builtin_domain, normalize_domain};
+pub use domains::{
+    custom_rules, is_builtin_domain, normalize_domain, normalize_host, normalize_lang,
+    normalize_site_rule,
+};
 pub use version::{is_newer, parse_version};
 
 pub use transform::{

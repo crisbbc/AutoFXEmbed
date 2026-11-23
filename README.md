@@ -42,9 +42,18 @@ works.
 | Bluesky       | `bsky.app`      | `fxbsky.app`     |
 | TikTok        | `tiktok.com`    | `tnktok.com`     |
 
-- Everything else in the URL is preserved: subdomain, port, path, query and
-  fragment, minus [tracking parameters](#link-trackers). The clipboard is
-  updated in place.
+- Everything else in the URL is preserved: port, path, query and fragment,
+  minus [tracking parameters](#link-trackers). Content subdomains like
+  `mobile.`/`www.` are normalized cleanly (while TikTok short-link subdomains
+  `vm.`/`vt.` are preserved). Non-content subdomains (such as `developer.x.com`
+  or `docs.bsky.app`) and non-post pages (like `/settings`, `/home`, or bare
+  root URLs) are left untouched.
+- Each built-in site can be toggled on or off individually, and you can add
+  custom `source -> target` site rules (for example `reddit.com -> rxddit.com`
+  or `instagram.com -> kkinstagram.com`) right from the panel or
+  `<config dir>/autofxembed/extra_rules.txt`.
+- Optional **Auto-translate** appends an FxEmbed language code (e.g. `en`) to X
+  status URLs.
 - Links embedded in prose are rewritten too, including ones wrapped in
   brackets or quotes, like `(https://x.com/...)`.
 - Already-converted links and unrelated URLs are left untouched.
@@ -63,7 +72,7 @@ in the tray panel.
   also when they are already on an embed host such as `fixupx.com`. Other X
   links lose `s`, `t`, `a`, `ref_src` and `ref_url`.
 - Removed only on their own site: TikTok's share parameters such as
-  `is_from_webapp` and `sender_device`; `si`, `pp`, `feature` (YouTube); `si`, `nd` (Spotify); `img_index` (Instagram);
+  `is_from_webapp` and `sender_device`; `si`, `pp`, `feature` (YouTube); `si`, `nd` (Spotify);
   `share_id`, `rdt`, `ref_source` (Reddit).
 - Links that were only cleaned are not added to the [history](#history).
 - The setting is stored in `<config dir>/autofxembed/strip_trackers`.
@@ -90,16 +99,14 @@ icon's **X / Twitter** section; the choice is remembered.
 
 ### Your own domain
 
-Know another FxEmbed-style mirror? In the **X / Twitter** section, click
-**Add custom domain...** and type it (`myfx.com`, or a full URL; only the host
-is kept). It is selected right away, and `x.com` / `twitter.com` links will be
-rewritten to it. Use **Remove custom domain** to forget one again.
+Know another FxEmbed-style mirror? In the **X / Twitter** section of the tray
+panel (or Android settings), type it (`myfx.com`, or a full URL; only the host
+is kept) and press **Add**. It is selected right away, and `x.com` /
+`twitter.com` links will be rewritten to it. Click **✕** to remove one again.
 
-- The dialog is a PowerShell input box on Windows, and `kdialog` or `zenity`
-  on Linux. If neither is installed, the domain list opens in your editor instead.
 - Domains are stored one per line in `<config dir>/autofxembed/custom_domains.txt`
   (`~/.config/autofxembed/` on Linux). You can edit it by hand; lines starting
-  with `#` are ignored, and changes show up the next time you open the menu.
+  with `#` are ignored, and changes show up the next time you open the panel.
 - Domains that would be rewritten again (`x.com`, `twitter.com` and their
   subdomains) and the built-in hosts above are rejected.
 - As with the built-ins, custom domains are third-party services. You are
@@ -140,17 +147,18 @@ anywhere. It is already embed-friendly.
 
 ## Tray panel
 
-Left-click the tray icon to open a small flyout next to it. It closes when you click elsewhere or press Esc.
+Left-click the tray icon to open a small flyout next to it. It updates live while open and closes when you click elsewhere or press Esc.
 
-- **X / Twitter**: pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own). The choice is remembered. Type a domain and press **Add** to add your own, or click **✕** to remove one.
-- **TikTok**: informational, shows the host it is rewritten to.
-- **Recent**: the last 10 converted links, labeled with their title and description. Click one to copy its embed link again, or **Clear** to forget every stored link.
+- **Pause / Resume**: temporarily pause clipboard rewriting without quitting (also available in the right-click menu; the tray icon dims on Linux while paused).
+- **Sites**: toggle **X / Twitter**, **Bluesky**, and **TikTok** individually, or add custom `source -> target` site rules.
+- **X / Twitter**: pick the target (FixUpX, BoyPussyX, MpregX, YaoiSex, FaggotX or one of your own), add/remove custom domains, and optionally configure an **Auto-translate** language code (e.g. `en`).
+- **Recent**: converted links with their title, description snippet, and relative age, plus live search and **Show all** (up to 100 entries). Click one to copy its embed link, hover for **RAW** (copy the original link without re-rewriting) or **✕** (remove), or **Clear** to forget every stored link.
 - **Remove link trackers**: see [Link trackers](#link-trackers).
 - **Start on startup**: checked when AutoFxEmbed will launch at login. On Windows this toggles a value under `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`; on Linux it creates `~/.config/autostart/autofxembed.desktop`.
 - **Check for updates automatically** and **Check for updates now**: see [Updates](#updates).
 - **Quit AutoFxEmbed**: exits.
 
-Right-click the icon for a minimal **Open** / **Quit** menu, which is also the way in on Linux desktops whose tray never reports left-clicks. On Wayland the compositor decides where the panel appears, so it may not sit next to the icon. On Linux the panel needs the usual graphics libraries (OpenGL/EGL and xkbcommon).
+Right-click the icon for a minimal **Open** / **Pause** / **Quit** menu, which is also the way in on Linux desktops whose tray never reports left-clicks. On Wayland the compositor decides where the panel appears, so it may not sit next to the icon. On Linux the panel needs the usual graphics libraries (OpenGL/EGL and xkbcommon).
 
 ## History
 
@@ -161,8 +169,9 @@ what each link is.
 
 - That fetch and the [update check](#updates) are the only network requests
   AutoFxEmbed makes.
-- If it fails, for example because the page has no embed data, the entry is
-  dropped from the history.
+- Confirmed non-embed pages (such as a `4xx` or an unrelated redirect) are
+  dropped; transient offline or `5xx`/`429` errors keep the entry and retry
+  automatically the next time you open the panel or restart.
 - The history is stored in `<config dir>/autofxembed/history.json`
   (`~/.config/autofxembed/` on Linux).
 
@@ -188,20 +197,26 @@ updates...**.
 ## Android
 
 Android doesn't let background apps watch the clipboard, so on Android you
-share links to the app instead. Share a link from X, Bluesky, TikTok, a
-browser or any other app, pick **Copy embed link**, and the converted text is
-copied to your clipboard. Shared text with links in it works too.
+share links to the app—or tap **Convert clipboard** inside the app. Share a
+link from X, Bluesky, TikTok, a browser or any other app and pick either:
+
+- **Copy embed link**: converts the text and copies it to your clipboard.
+- **Share embed link**: converts the text and immediately opens the Android
+  share sheet so you can forward it straight to Discord, Telegram, etc.
 
 The app's screen has the same settings as the desktop panel:
 
-- **X / Twitter**: pick a built-in target, or type your own domain and tap
-  **Add**. Tap **✕** to remove one.
+- **Sites**: toggle X / Twitter, Bluesky, and TikTok individually, or add
+  custom `source -> target` site rules.
+- **X / Twitter**: pick a built-in target, add/remove your own domains, and
+  optionally set an **Auto-translate** language code.
 - **Remove link trackers**: see [Link trackers](#link-trackers).
 - **Recent**: the last 10 converted links with their title and description.
-  Tap one to copy it again, or **Clear** to forget them. The embed page is read
-  once, as on the desktop. A link whose page isn't an embed is dropped; one
-  that couldn't be read because you were offline is tried again the next time
-  you open the app.
+  Tap one to copy it again, long-press to copy the original link, share, or
+  remove, or tap **Clear** to forget them. History is excluded from Android
+  cloud backups. The embed page is read once, as on the desktop: confirmed
+  non-embeds are dropped, while offline or `5xx`/`429` errors retry the next
+  time you open the app.
 - **Updates**: checked against the latest GitHub release when you open the
   app, at most once a day, or with **Check for updates now**. The APK is
   verified against GitHub's SHA-256 digest before Android's installer asks

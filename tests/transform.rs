@@ -69,19 +69,17 @@ fn transforms_no_scheme() {
 }
 
 #[test]
-fn transforms_subdomain() {
+fn transforms_mobile_subdomain_to_apex() {
     assert_eq!(
         transform_clipboard("https://mobile.twitter.com/foo"),
-        Some("https://mobile.fxtwitter.com/foo".to_string())
+        Some("https://fxtwitter.com/foo".to_string())
     );
 }
 
 #[test]
-fn transforms_x_subdomain() {
-    assert_eq!(
-        transform_clipboard("https://api.x.com/2/foo"),
-        Some("https://api.fixupx.com/2/foo".to_string())
-    );
+fn skips_non_content_x_subdomain() {
+    assert_eq!(transform_clipboard("https://api.x.com/2/foo"), None);
+    assert_eq!(transform_clipboard("https://developer.x.com/en/docs"), None);
 }
 
 #[test]
@@ -109,11 +107,9 @@ fn preserves_query_and_fragment() {
 }
 
 #[test]
-fn transforms_bare_host_no_path() {
-    assert_eq!(
-        transform_clipboard("https://twitter.com"),
-        Some("https://fxtwitter.com".to_string())
-    );
+fn skips_bare_host_no_path() {
+    assert_eq!(transform_clipboard("https://twitter.com"), None);
+    assert_eq!(transform_clipboard("https://x.com/"), None);
 }
 
 #[test]

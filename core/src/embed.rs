@@ -23,6 +23,15 @@ pub fn parse_og(html: &str) -> Og {
     let mut from = 0;
     while let Some(found) = lower[from..].find("<meta") {
         let start = from + found + "<meta".len();
+        // Require a tag-name boundary so e.g. `<metadata>` is not matched.
+        let is_meta_tag = lower
+            .as_bytes()
+            .get(start)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'/' || *b == b'>');
+        if !is_meta_tag {
+            from = start;
+            continue;
+        }
         let end = tag_end(html, start);
         from = end;
         let (mut key, mut content) = (None, None);
@@ -56,7 +65,19 @@ pub fn parse_og(html: &str) -> Og {
 }
 
 fn page_title(html: &str, lower: &str) -> Option<String> {
-    let open = lower.find("<title")?;
+    let mut from = 0;
+    let open = loop {
+        let found = from + lower[from..].find("<title")?;
+        let after = found + "<title".len();
+        if lower
+            .as_bytes()
+            .get(after)
+            .is_some_and(|b| b.is_ascii_whitespace() || *b == b'>')
+        {
+            break found;
+        }
+        from = after;
+    };
     let start = open + lower[open..].find('>')? + 1;
     let end = start + lower[start..].find("</title")?;
     let title = decode_entities(html[start..end].trim());
@@ -131,6 +152,17 @@ fn decode_entities(text: &str) -> String {
                 "gt" => Some('>'),
                 "quot" => Some('"'),
                 "apos" => Some('\''),
+                "nbsp" => Some(' '),
+                "mdash" => Some('—'),
+                "ndash" => Some('–'),
+                "hellip" => Some('…'),
+                "lsquo" => Some('‘'),
+                "rsquo" => Some('’'),
+                "ldquo" => Some('“'),
+                "rdquo" => Some('”'),
+                "copy" => Some('©'),
+                "reg" => Some('®'),
+                "trade" => Some('™'),
                 _ => name.strip_prefix('#').and_then(|num| {
                     let code = match num.strip_prefix(['x', 'X']) {
                         Some(hex) => u32::from_str_radix(hex, 16).ok()?,
@@ -285,6 +317,16 @@ mod tests {
             decode_entities("a &nope; b & c &#xZZ;"),
             "a &nope; b & c &#xZZ;"
         );
+        assert_eq!(
+            decode_entities("&ldquo;Hi&rdquo;&nbsp;&mdash;&nbsp;wait&hellip;"),
+            "“Hi” — wait…"
+        );
+    }
+
+    #[test]
+    fn ignores_non_meta_tags_with_meta_prefix() {
+        let html = r#"<metadata property="og:title" content="Wrong"><meta property="og:title" content="Right">"#;
+        assert_eq!(parse_og(html).title.as_deref(), Some("Right"));
     }
 
     #[test]

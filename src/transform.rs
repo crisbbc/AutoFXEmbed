@@ -7,10 +7,21 @@ pub use autofxembed_core::Rewrite;
 
 fn with_options<R>(f: impl FnOnce(&Options) -> R) -> R {
     let strip_trackers = crate::config::strip_trackers();
-    crate::config::with_x_rules(|x_rules| {
-        f(&Options {
-            x_rules,
-            strip_trackers,
+    let rewrite_x = crate::config::rewrite_x();
+    let rewrite_bsky = crate::config::rewrite_bsky();
+    let rewrite_tiktok = crate::config::rewrite_tiktok();
+    let x_translate_lang = crate::config::x_translate_lang();
+    crate::config::with_extra_rules(|extra_rules| {
+        crate::config::with_x_rules(|x_rules| {
+            f(&Options {
+                x_rules,
+                strip_trackers,
+                rewrite_x,
+                rewrite_bsky,
+                rewrite_tiktok,
+                extra_rules,
+                x_translate_lang: x_translate_lang.as_deref(),
+            })
         })
     })
 }
